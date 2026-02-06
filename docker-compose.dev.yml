@@ -9,7 +9,7 @@
 
 services:
   nofx:
-    image: small147/nofx20260204:backend-test
+    image: small147/nofx20260206:backend-test
     container_name: nofx-trading-dev
     restart: unless-stopped
     stop_grace_period: 30s
