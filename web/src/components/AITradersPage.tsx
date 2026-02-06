@@ -461,6 +461,12 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           success: '已启动',
           error: '启动失败',
         })
+        // If there was a scheduled start, clear it after manual start to avoid double-trigger
+        try {
+          await api.cancelScheduleStart(traderId)
+        } catch (err) {
+          console.warn('Failed to clear scheduled start after manual start:', err)
+        }
       }
 
       // Immediately refresh traders list to update running status

@@ -51,6 +51,7 @@
 - Binance TP/SL injection: AI context now includes your live stop-loss/take-profit per position (pulled from open orders), so reasoning reflects the actual protective orders already on the book.
 - JSON output rule hardened: if you need approximation, prefix the number with the Chinese “约”; never use symbols like `~` or `≈` to avoid parsing issues.
 - Trader scheduling: from the Traders page you can schedule a trader to auto-start at a specific HH:MM (local time). Includes badge display, schedule/cancel actions, and API support (`schedule-start` / `schedule-start/cancel`).
+- Manual start now auto-clears any scheduled start to prevent double-trigger when the scheduled time arrives.
 
 ### Core Team
 
