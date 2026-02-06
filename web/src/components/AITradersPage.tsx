@@ -31,6 +31,7 @@ import {
   ExternalLink,
   Copy,
   Check,
+  Clock,
 } from 'lucide-react'
 import { confirmToast } from '../lib/notify'
 import { toast } from 'sonner'
@@ -200,6 +201,14 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     api.getTraders,
     { refreshInterval: 5000 }
   )
+
+  const formatScheduledTime = (iso?: string) => {
+    if (!iso) return ''
+    const d = new Date(iso)
+    const hh = d.getHours().toString().padStart(2, '0')
+    const mm = d.getMinutes().toString().padStart(2, '0')
+    return `${hh}:${mm}`
+  }
 
   // 加载AI模型和交易所配置
   useEffect(() => {
@@ -459,6 +468,62 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     } catch (error) {
       console.error('Failed to toggle trader:', error)
       toast.error(t('operationFailed', language))
+    }
+  }
+
+  // Schedule start
+  const openScheduleForTrader = async (traderId: string) => {
+    const defaultTime = '09:15'
+    const label = language === 'zh' ? '输入启动时间 (HH:MM)' : 'Enter start time (HH:MM)'
+    const timeStr = window.prompt(label, defaultTime)
+    if (!timeStr) return
+
+    // Basic HH:MM validation
+    const match = timeStr.match(/^(\d{1,2}):(\d{2})$/)
+    if (!match) {
+      toast.error(language === 'zh' ? '时间格式错误' : 'Invalid time')
+      return
+    }
+    const hours = parseInt(match[1], 10)
+    const minutes = parseInt(match[2], 10)
+    if (hours > 23 || minutes > 59) {
+      toast.error(language === 'zh' ? '时间格式错误' : 'Invalid time')
+      return
+    }
+
+    // Build ISO time (if time already passed today, schedule for next day)
+    const now = new Date()
+    const target = new Date(now)
+    target.setHours(hours, minutes, 0, 0)
+    if (target.getTime() <= now.getTime()) {
+      target.setDate(target.getDate() + 1)
+    }
+    const isoTime = target.toISOString()
+
+    try {
+      await toast.promise(api.scheduleStartTrader(traderId, isoTime), {
+        loading: language === 'zh' ? '正在预约启动…' : 'Scheduling…',
+        success: language === 'zh' ? '已预约启动' : 'Scheduled',
+        error: language === 'zh' ? '预约失败' : 'Schedule failed',
+      })
+      await mutateTraders()
+    } catch (error) {
+      console.error('Failed to schedule start:', error)
+      toast.error(language === 'zh' ? '预约失败' : 'Schedule failed')
+    }
+  }
+
+  const handleCancelSchedule = async (traderId: string) => {
+    try {
+      await toast.promise(api.cancelScheduleStart(traderId), {
+        loading: language === 'zh' ? '取消预约中…' : 'Canceling…',
+        success: language === 'zh' ? '已取消定时启动' : 'Schedule canceled',
+        error: language === 'zh' ? '取消失败' : 'Cancel failed',
+      })
+      await mutateTraders()
+    } catch (error) {
+      console.error('Failed to cancel schedule:', error)
+      toast.error(language === 'zh' ? '取消失败' : 'Cancel failed')
     }
   }
 
@@ -1167,11 +1232,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       )
                     })()}
                     {/* Status */}
-                    <div className="text-center">
-                      {/* <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
+                      <div className="text-center">
+                        {/* <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
                       {t('status', language)}
                     </div> */}
-                      <div
+                        <div
                         className={`px-2 md:px-3 py-1 rounded text-xs font-bold ${trader.is_running
                           ? 'bg-green-100 text-green-800'
                           : 'bg-red-100 text-red-800'
@@ -1192,6 +1257,12 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                           ? t('running', language)
                           : t('stopped', language)}
                       </div>
+                      {trader.scheduled_start_at && (
+                        <div className="mt-1 text-[10px] px-2 py-0.5 rounded-full inline-block"
+                          style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B', border: '1px solid rgba(240,185,11,0.3)' }}>
+                          {(language === 'zh' ? '已预约 ' : 'Scheduled ') + formatScheduledTime(trader.scheduled_start_at)}
+                        </div>
+                      )}
                     </div>
 
                     {/* Actions: 禁止换行，超出横向滚动 */}
@@ -1255,6 +1326,32 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                           ? t('stop', language)
                           : t('start', language)}
                       </button>
+
+                      <button
+                        onClick={() => openScheduleForTrader(trader.trader_id)}
+                        className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap flex items-center gap-1"
+                        style={{
+                          background: 'rgba(99, 102, 241, 0.1)',
+                          color: '#6366F1',
+                        }}
+                      >
+                        <Clock className="w-3 h-3 md:w-4 md:h-4" />
+                        {language === 'zh' ? '定时启动' : 'Schedule'}
+                      </button>
+
+                      {trader.scheduled_start_at && (
+                        <button
+                          onClick={() => handleCancelSchedule(trader.trader_id)}
+                          className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap"
+                          style={{
+                            background: 'rgba(246, 70, 93, 0.08)',
+                            color: '#F6465D',
+                            border: '1px solid rgba(246,70,93,0.3)',
+                          }}
+                        >
+                          {language === 'zh' ? '取消定时' : 'Cancel'}
+                        </button>
+                      )}
 
                       <button
                         onClick={() => handleToggleCompetition(trader.trader_id, trader.show_in_competition ?? true)}

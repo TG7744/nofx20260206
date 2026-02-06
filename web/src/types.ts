@@ -97,6 +97,7 @@ export interface TraderInfo {
   ai_model: string
   exchange_id?: string
   is_running?: boolean
+  scheduled_start_at?: string   // 定时启动（服务器返回的预约时间，RFC3339）
   show_in_competition?: boolean
   strategy_id?: string
   strategy_name?: string
