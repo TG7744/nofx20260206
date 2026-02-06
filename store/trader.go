@@ -62,15 +62,7 @@ type TraderFullConfig struct {
 }
 
 func (s *TraderStore) initTables() error {
-	// For PostgreSQL with existing table, skip AutoMigrate
-	if s.db.Dialector.Name() == "postgres" {
-		var tableExists int64
-		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'traders'`).Scan(&tableExists)
-		if tableExists > 0 {
-			return nil
-		}
-	}
-	// Use GORM AutoMigrate
+	// Always run AutoMigrate (safe additive changes) so new columns like drawdown guard are added
 	if err := s.db.AutoMigrate(&Trader{}); err != nil {
 		return fmt.Errorf("failed to migrate traders table: %w", err)
 	}

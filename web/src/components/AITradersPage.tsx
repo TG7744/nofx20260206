@@ -159,6 +159,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   const [visibleTraderAddresses, setVisibleTraderAddresses] = useState<Set<string>>(new Set())
   const [visibleExchangeAddresses, setVisibleExchangeAddresses] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [scheduleTimes, setScheduleTimes] = useState<Record<string, string>>({})
   // Drawdown guard form
   const [ddTraderId, setDdTraderId] = useState<string | null>(null)
   const [ddEnabled, setDdEnabled] = useState(false)
@@ -499,10 +500,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
 
   // Schedule start
   const openScheduleForTrader = async (traderId: string) => {
-    const defaultTime = '09:15'
-    const label = language === 'zh' ? '输入启动时间 (HH:MM)' : 'Enter start time (HH:MM)'
-    const timeStr = window.prompt(label, defaultTime)
-    if (!timeStr) return
+    const timeStr = scheduleTimes[traderId] || '09:15'
 
     // Basic HH:MM validation
     const match = timeStr.match(/^(\d{1,2}):(\d{2})$/)
@@ -578,19 +576,6 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     } catch (err) {
       console.error('Failed to update drawdown guard:', err)
       toast.error(language === 'zh' ? '保存失败' : 'Save failed')
-    }
-  }
-
-  const handleSyncHistory = async (traderId: string) => {
-    try {
-      await toast.promise(api.syncTraderHistory(traderId), {
-        loading: language === 'zh' ? '正在同步历史…' : 'Syncing history…',
-        success: language === 'zh' ? '历史已同步（近24h）' : 'History synced (last 24h)',
-        error: language === 'zh' ? '同步失败' : 'Sync failed',
-      })
-    } catch (err) {
-      console.error('Failed to sync history:', err)
-      toast.error(language === 'zh' ? '同步失败' : 'Sync failed')
     }
   }
 
@@ -1396,12 +1381,6 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                           ? t('running', language)
                           : t('stopped', language)}
                       </div>
-                      {trader.scheduled_start_at && (
-                        <div className="mt-1 text-[10px] px-2 py-0.5 rounded-full inline-block"
-                          style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B', border: '1px solid rgba(240,185,11,0.3)' }}>
-                          {(language === 'zh' ? '已预约 ' : 'Scheduled ') + formatScheduledTime(trader.scheduled_start_at)}
-                        </div>
-                      )}
                     </div>
 
                     {/* Actions: 禁止换行，超出横向滚动 */}
@@ -1466,28 +1445,69 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                           : t('start', language)}
                       </button>
 
-                      <button
-                        onClick={() => openScheduleForTrader(trader.trader_id)}
-                        className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap flex items-center gap-1"
-                        style={{
-                          background: 'rgba(99, 102, 241, 0.1)',
-                          color: '#6366F1',
-                        }}
-                      >
-                        <Clock className="w-3 h-3 md:w-4 md:h-4" />
-                        {language === 'zh' ? '定时启动' : 'Schedule'}
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="time"
+                          value={scheduleTimes[trader.trader_id] || '09:15'}
+                          onChange={(e) =>
+                            setScheduleTimes(prev => ({
+                              ...prev,
+                              [trader.trader_id]: e.target.value || '09:15',
+                            }))
+                          }
+                          className="px-2 py-1 rounded text-xs md:text-sm border border-gray-700 bg-transparent text-white w-[90px]"
+                        />
+                                              <div className="flex items-center gap-1">
+                        <input
+                          type="time"
+                          value={scheduleTimes[trader.trader_id] || '09:15'}
+                          onChange={(e) =>
+                            setScheduleTimes(prev => ({
+                              ...prev,
+                              [trader.trader_id]: e.target.value || '09:15',
+                            }))
+                          }
+                          className="px-2 py-1 rounded text-xs md:text-sm border border-gray-700 bg-transparent text-white w-[90px]"
+                        />
+                        <button
+                          onClick={() => openScheduleForTrader(trader.trader_id)}
+                          className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap flex items-center gap-1"
+                          style={{
+                            background: 'rgba(99, 102, 241, 0.1)',
+                            color: '#6366F1',
+                          }}
+                        >
+                          <Clock className="w-3 h-3 md:w-4 md:h-4" />
+                          {language === 'zh' ? '定时启动' : 'Schedule'}
+                        </button>
+                      </div>
 
-                      <button
-                        onClick={() => handleSyncHistory(trader.trader_id)}
-                        className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap"
-                        style={{
-                          background: 'rgba(99, 102, 241, 0.1)',
-                          color: '#6366F1',
-                        }}
-                      >
-                        {language === 'zh' ? '同步历史' : 'Sync history'}
-                      </button>
+                      {trader.scheduled_start_at && (
+                        <div
+                          className="px-2 py-1 rounded text-xs md:text-sm font-semibold whitespace-nowrap"
+                          style={{
+                            background: 'rgba(240, 185, 11, 0.12)',
+                            color: '#F0B90B',
+                            border: '1px solid rgba(240,185,11,0.25)',
+                          }}
+                        >
+                          {(language === 'zh' ? '已预约 ' : 'Scheduled ') + formatScheduledTime(trader.scheduled_start_at)}
+                        </div>
+                      )}
+                      </div>
+
+                      {trader.scheduled_start_at && (
+                        <div
+                          className="px-2 py-1 rounded text-xs md:text-sm font-semibold whitespace-nowrap"
+                          style={{
+                            background: 'rgba(240, 185, 11, 0.12)',
+                            color: '#F0B90B',
+                            border: '1px solid rgba(240,185,11,0.25)',
+                          }}
+                        >
+                          {(language === 'zh' ? '已预约 ' : 'Scheduled ') + formatScheduledTime(trader.scheduled_start_at)}
+                        </div>
+                      )}
 
                       {trader.scheduled_start_at && (
                         <button
