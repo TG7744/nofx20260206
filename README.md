@@ -54,6 +54,7 @@
 - Manual start now auto-clears any scheduled start to prevent double-trigger when the scheduled time arrives.
 - AI Trader drawdown guard is now configurable per trader: toggle on/off, set min profit % trigger and peak-retrace %; changes apply immediately to the running trader (monitor goroutine restarts with new thresholds).
 - Manual history sync (Binance): “Sync history (24h)” button in trader/position history triggers a forced 24h Binance resync to backfill missing fills/positions without waiting for the next cycle.
+- Position uptime fix: after pausing/restarting a trader, position start time now correctly persists (DB lookup uses normalized LONG/SHORT side).
 
 ### Core Team
 
