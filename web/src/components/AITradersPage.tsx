@@ -32,6 +32,7 @@ import {
   Copy,
   Check,
   Clock,
+  Shield,
 } from 'lucide-react'
 import { confirmToast } from '../lib/notify'
 import { toast } from 'sonner'
@@ -158,6 +159,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   const [visibleTraderAddresses, setVisibleTraderAddresses] = useState<Set<string>>(new Set())
   const [visibleExchangeAddresses, setVisibleExchangeAddresses] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  // Drawdown guard form
+  const [ddTraderId, setDdTraderId] = useState<string | null>(null)
+  const [ddEnabled, setDdEnabled] = useState(false)
+  const [ddMinProfit, setDdMinProfit] = useState<number>(5)
+  const [ddRetrace, setDdRetrace] = useState<number>(40)
 
   // Toggle wallet address visibility for a trader
   const toggleTraderAddressVisibility = (traderId: string) => {
@@ -201,6 +207,20 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     api.getTraders,
     { refreshInterval: 5000 }
   )
+
+  useEffect(() => {
+    if (traders && traders.length > 0) {
+      const target = traders[0]
+      setDdTraderId(target.trader_id)
+      setDdEnabled(!!target.enable_drawdown_guard)
+      setDdMinProfit(
+        target.drawdown_min_profit_pct !== undefined ? target.drawdown_min_profit_pct : 5
+      )
+      setDdRetrace(
+        target.drawdown_retrace_pct !== undefined ? target.drawdown_retrace_pct : 40
+      )
+    }
+  }, [traders])
 
   const formatScheduledTime = (iso?: string) => {
     if (!iso) return ''
@@ -530,6 +550,47 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     } catch (error) {
       console.error('Failed to cancel schedule:', error)
       toast.error(language === 'zh' ? '取消失败' : 'Cancel failed')
+    }
+  }
+
+  const handleSaveDrawdown = async () => {
+    if (!ddTraderId) return
+    if (ddEnabled) {
+      if (ddMinProfit < 0 || ddRetrace <= 0) {
+        toast.error(language === 'zh' ? '参数无效' : 'Invalid parameters')
+        return
+      }
+    }
+    try {
+      await toast.promise(
+        api.updateDrawdown(ddTraderId, {
+          enable_drawdown_guard: ddEnabled,
+          drawdown_min_profit_pct: ddMinProfit,
+          drawdown_retrace_pct: ddRetrace,
+        }),
+        {
+          loading: language === 'zh' ? '正在保存…' : 'Saving…',
+          success: language === 'zh' ? '已更新回撤保护' : 'Drawdown guard updated',
+          error: language === 'zh' ? '保存失败' : 'Save failed',
+        }
+      )
+      await mutateTraders()
+    } catch (err) {
+      console.error('Failed to update drawdown guard:', err)
+      toast.error(language === 'zh' ? '保存失败' : 'Save failed')
+    }
+  }
+
+  const handleSyncHistory = async (traderId: string) => {
+    try {
+      await toast.promise(api.syncTraderHistory(traderId), {
+        loading: language === 'zh' ? '正在同步历史…' : 'Syncing history…',
+        success: language === 'zh' ? '历史已同步（近24h）' : 'History synced (last 24h)',
+        error: language === 'zh' ? '同步失败' : 'Sync failed',
+      })
+    } catch (err) {
+      console.error('Failed to sync history:', err)
+      toast.error(language === 'zh' ? '同步失败' : 'Sync failed')
     }
   }
 
@@ -1097,11 +1158,83 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               )}
             </div>
           </div>
-        </div>
+          </div>
 
-        {/* Traders List */}
-        <div className="binance-card p-4 md:p-6">
-          <div className="flex items-center justify-between mb-4 md:mb-5">
+          {/* Traders List */}
+          <div className="binance-card p-4 md:p-5 mb-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Shield className="w-4 h-4 text-nofx-gold" />
+              <h3 className="text-sm font-mono tracking-widest text-zinc-300 uppercase">
+                {language === 'zh' ? '回撤保护' : 'Drawdown Guard'}
+              </h3>
+            </div>
+            <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
+              <label className="flex items-center gap-2 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={ddEnabled}
+                  onChange={(e) => setDdEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-amber-400"
+                />
+                {language === 'zh' ? '开启回撤保护' : 'Enable guard'}
+              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-400 whitespace-nowrap">{language === 'zh' ? '触发最低盈利(%)' : 'Min profit (%)'}</span>
+                <input
+                  type="number"
+                  value={ddMinProfit}
+                  onChange={(e) => setDdMinProfit(parseFloat(e.target.value))}
+                  className="w-20 px-2 py-1 rounded bg-black/30 border border-zinc-800 text-sm text-zinc-100"
+                  disabled={!ddEnabled}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-400 whitespace-nowrap">{language === 'zh' ? '峰值回撤(%)' : 'Retrace (%)'}</span>
+                <input
+                  type="number"
+                  value={ddRetrace}
+                  onChange={(e) => setDdRetrace(parseFloat(e.target.value))}
+                  className="w-20 px-2 py-1 rounded bg-black/30 border border-zinc-800 text-sm text-zinc-100"
+                  disabled={!ddEnabled}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-400 whitespace-nowrap">{language === 'zh' ? '选择交易员' : 'Trader'}</span>
+                <select
+                  className="px-2 py-1 rounded bg-black/30 border border-zinc-800 text-sm text-zinc-100"
+                  value={ddTraderId || ''}
+                  onChange={(e) => {
+                    const id = e.target.value
+                    setDdTraderId(id)
+                    const tgt = traders?.find((t) => t.trader_id === id)
+                    if (tgt) {
+                      setDdEnabled(!!tgt.enable_drawdown_guard)
+                      setDdMinProfit(tgt.drawdown_min_profit_pct ?? 5)
+                      setDdRetrace(tgt.drawdown_retrace_pct ?? 40)
+                    }
+                  }}
+                >
+                  {traders?.map((t) => (
+                    <option key={t.trader_id} value={t.trader_id}>
+                      {t.trader_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveDrawdown}
+                  className="px-3 py-1.5 rounded text-sm font-semibold transition-all hover:scale-105"
+                  style={{ background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }}
+                >
+                  {language === 'zh' ? '保存' : 'Save'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="binance-card p-4 md:p-6">
+            <div className="flex items-center justify-between mb-4 md:mb-5">
             <h2
               className="text-lg md:text-xl font-bold flex items-center gap-2"
               style={{ color: '#EAECEF' }}
@@ -1343,6 +1476,17 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       >
                         <Clock className="w-3 h-3 md:w-4 md:h-4" />
                         {language === 'zh' ? '定时启动' : 'Schedule'}
+                      </button>
+
+                      <button
+                        onClick={() => handleSyncHistory(trader.trader_id)}
+                        className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap"
+                        style={{
+                          background: 'rgba(99, 102, 241, 0.1)',
+                          color: '#6366F1',
+                        }}
+                      >
+                        {language === 'zh' ? '同步历史' : 'Sync history'}
                       </button>
 
                       {trader.scheduled_start_at && (

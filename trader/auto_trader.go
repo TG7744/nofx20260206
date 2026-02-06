@@ -100,6 +100,11 @@ type AutoTraderConfig struct {
 	MaxDrawdown     float64       // Maximum drawdown percentage (hint)
 	StopTradingTime time.Duration // Pause duration after risk control triggers
 
+	// Drawdown guard (per-trader)
+	EnableDrawdownGuard  bool
+	DrawdownMinProfitPct float64
+	DrawdownRetracePct   float64
+
 	// Position mode
 	IsCrossMargin bool // true=cross margin mode, false=isolated margin mode
 
@@ -1898,6 +1903,23 @@ func (at *AutoTrader) startDrawdownMonitor() {
 	go func() {
 		defer at.monitorWg.Done()
 
+		if !at.config.EnableDrawdownGuard {
+			logger.Info("⏸ Drawdown monitoring disabled by config")
+			return
+		}
+
+		// Set defaults if not provided
+		minProfitTrigger := at.config.DrawdownMinProfitPct
+		if minProfitTrigger <= 0 {
+			minProfitTrigger = 5.0
+		}
+		retraceTrigger := at.config.DrawdownRetracePct
+		if retraceTrigger <= 0 {
+			retraceTrigger = 40.0
+		}
+		at.config.DrawdownMinProfitPct = minProfitTrigger
+		at.config.DrawdownRetracePct = retraceTrigger
+
 		ticker := time.NewTicker(1 * time.Minute) // Check every minute
 		defer ticker.Stop()
 
@@ -1917,6 +1939,18 @@ func (at *AutoTrader) startDrawdownMonitor() {
 
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
+	if !at.config.EnableDrawdownGuard {
+		return
+	}
+	minProfitTrigger := at.config.DrawdownMinProfitPct
+	if minProfitTrigger <= 0 {
+		minProfitTrigger = 5.0
+	}
+	retraceTrigger := at.config.DrawdownRetracePct
+	if retraceTrigger <= 0 {
+		retraceTrigger = 40.0
+	}
+
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -1970,8 +2004,8 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
 		}
 
-		// Check close position condition: profit > 5% and drawdown >= 40%
-		if currentPnLPct > 5.0 && drawdownPct >= 40.0 {
+		// Check close position condition based on config thresholds
+		if currentPnLPct > minProfitTrigger && drawdownPct >= retraceTrigger {
 			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%%",
 				symbol, side, currentPnLPct, peakPnLPct, drawdownPct)
 

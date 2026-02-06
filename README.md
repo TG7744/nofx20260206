@@ -52,6 +52,8 @@
 - JSON output rule hardened: if you need approximation, prefix the number with the Chinese “约”; never use symbols like `~` or `≈` to avoid parsing issues.
 - Trader scheduling: from the Traders page you can schedule a trader to auto-start at a specific HH:MM (local time). Includes badge display, schedule/cancel actions, and API support (`schedule-start` / `schedule-start/cancel`).
 - Manual start now auto-clears any scheduled start to prevent double-trigger when the scheduled time arrives.
+- AI Trader drawdown guard is now configurable per trader: toggle on/off, set min profit % trigger and peak-retrace %; changes apply immediately to the running trader (monitor goroutine restarts with new thresholds).
+- Manual history sync (Binance): “Sync history (24h)” button in trader/position history triggers a forced 24h Binance resync to backfill missing fills/positions without waiting for the next cycle.
 
 ### Core Team
 

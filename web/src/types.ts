@@ -98,6 +98,9 @@ export interface TraderInfo {
   exchange_id?: string
   is_running?: boolean
   scheduled_start_at?: string   // 定时启动（服务器返回的预约时间，RFC3339）
+  enable_drawdown_guard?: boolean
+  drawdown_min_profit_pct?: number
+  drawdown_retrace_pct?: number
   show_in_competition?: boolean
   strategy_id?: string
   strategy_name?: string
@@ -168,6 +171,9 @@ export interface CreateTraderRequest {
   scan_interval_minutes?: number
   is_cross_margin?: boolean
   show_in_competition?: boolean // 是否在竞技场显示
+  enable_drawdown_guard?: boolean
+  drawdown_min_profit_pct?: number
+  drawdown_retrace_pct?: number
   // 以下字段为向后兼容保留，新版使用策略配置
   btc_eth_leverage?: number
   altcoin_leverage?: number

@@ -18,6 +18,13 @@ var (
 	binanceSyncStateMutex sync.RWMutex
 )
 
+// ResetSyncState forces next sync to start from the given timestamp (Unix ms)
+func ResetSyncState(exchangeID string, startMs int64) {
+	binanceSyncStateMutex.Lock()
+	defer binanceSyncStateMutex.Unlock()
+	binanceSyncState[exchangeID] = startMs
+}
+
 // SyncOrdersFromBinance syncs Binance Futures trade history to local database
 // Uses COMMISSION detection + fromId for efficient incremental sync
 // Also creates/updates position records to ensure orders/fills/positions data consistency

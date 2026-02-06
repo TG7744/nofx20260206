@@ -4,6 +4,7 @@ import { useLanguage } from '../contexts/LanguageContext'
 import { t } from '../i18n/translations'
 import { MetricTooltip } from './MetricTooltip'
 import { formatPrice, formatQuantity } from '../utils/format'
+import { toast } from 'sonner'
 import type {
   HistoricalPosition,
   TraderStats,
@@ -341,6 +342,7 @@ export function PositionHistory({ traderId }: PositionHistoryProps) {
   const [stats, setStats] = useState<TraderStats | null>(null)
   const [symbolStats, setSymbolStats] = useState<SymbolStats[]>([])
   const [directionStats, setDirectionStats] = useState<DirectionStats[]>([])
+  const [syncing, setSyncing] = useState(false)
 
   // Pagination state
   const [pageSize, setPageSize] = useState<number>(20)
@@ -374,6 +376,27 @@ export function PositionHistory({ traderId }: PositionHistoryProps) {
       fetchData()
     }
   }, [traderId, pageSize])
+
+  const handleSyncHistory = async () => {
+    if (syncing) return
+    setSyncing(true)
+    try {
+      await toast.promise(api.syncTraderHistory(traderId), {
+        loading: language === 'zh' ? '正在同步历史…' : 'Syncing history…',
+        success: language === 'zh' ? '历史已同步（近24h）' : 'History synced (last 24h)',
+        error: language === 'zh' ? '同步失败' : 'Sync failed',
+      })
+      const data = await api.getPositionHistory(traderId, Math.max(200, pageSize * 5))
+      setPositions(data.positions || [])
+      setStats(data.stats)
+      setSymbolStats(data.symbol_stats || [])
+      setDirectionStats(data.direction_stats || [])
+    } catch (err) {
+      toast.error(language === 'zh' ? '同步失败' : 'Sync failed')
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   // Get unique symbols for filter
   const uniqueSymbols = useMemo(() => {
@@ -507,12 +530,31 @@ export function PositionHistory({ traderId }: PositionHistoryProps) {
         <div style={{ color: '#848E9C' }}>
           {t('positionHistory.noHistoryDesc', language)}
         </div>
+        <button
+          onClick={handleSyncHistory}
+          disabled={syncing}
+          className="mt-4 px-4 py-2 rounded text-sm font-semibold transition-all hover:scale-105 disabled:opacity-50"
+          style={{ background: 'rgba(99, 102, 241, 0.2)', color: '#8B5CF6', border: '1px solid rgba(99,102,241,0.4)' }}
+        >
+          {language === 'zh' ? '同步历史（近24h）' : 'Sync history (24h)'}
+        </button>
       </div>
     )
   }
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-end">
+        <button
+          onClick={handleSyncHistory}
+          disabled={syncing}
+          className="px-3 py-1.5 rounded text-xs font-semibold transition-all hover:scale-105 disabled:opacity-50"
+          style={{ background: 'rgba(99, 102, 241, 0.2)', color: '#8B5CF6', border: '1px solid rgba(99,102,241,0.4)' }}
+        >
+          {language === 'zh' ? '同步历史（近24h）' : 'Sync history (24h)'}
+        </button>
+      </div>
+
       {/* Overall Stats - Row 1: Core Metrics */}
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">

@@ -162,6 +162,8 @@ func (s *Server) setupRoutes() {
 			protected.DELETE("/traders/:id", s.handleDeleteTrader)
 			protected.POST("/traders/:id/start", s.handleStartTrader)
 			protected.POST("/traders/:id/stop", s.handleStopTrader)
+			protected.POST("/traders/:id/drawdown", s.handleUpdateDrawdown)
+			protected.POST("/traders/:id/sync-history", s.handleSyncTraderHistory)
 			protected.PUT("/traders/:id/prompt", s.handleUpdateTraderPrompt)
 			protected.POST("/traders/:id/sync-balance", s.handleSyncBalance)
 			protected.POST("/traders/:id/close-position", s.handleClosePosition)
@@ -404,14 +406,17 @@ func (s *Server) getTraderFromQuery(c *gin.Context) (*manager.TraderManager, str
 
 // AI trader management related structures
 type CreateTraderRequest struct {
-	Name                string  `json:"name" binding:"required"`
-	AIModelID           string  `json:"ai_model_id" binding:"required"`
-	ExchangeID          string  `json:"exchange_id" binding:"required"`
-	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	IsCrossMargin       *bool   `json:"is_cross_margin"`     // Pointer type, nil means use default value true
-	ShowInCompetition   *bool   `json:"show_in_competition"` // Pointer type, nil means use default value true
+	Name                 string  `json:"name" binding:"required"`
+	AIModelID            string  `json:"ai_model_id" binding:"required"`
+	ExchangeID           string  `json:"exchange_id" binding:"required"`
+	StrategyID           string  `json:"strategy_id"` // Strategy ID (new version)
+	InitialBalance       float64 `json:"initial_balance"`
+	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
+	IsCrossMargin        *bool   `json:"is_cross_margin"`     // Pointer type, nil means use default value true
+	ShowInCompetition    *bool   `json:"show_in_competition"` // Pointer type, nil means use default value true
+	EnableDrawdownGuard  *bool   `json:"enable_drawdown_guard"`
+	DrawdownMinProfitPct float64 `json:"drawdown_min_profit_pct"`
+	DrawdownRetracePct   float64 `json:"drawdown_retrace_pct"`
 	// The following fields are kept for backward compatibility, new version uses strategy config
 	BTCETHLeverage       int    `json:"btc_eth_leverage"`
 	AltcoinLeverage      int    `json:"altcoin_leverage"`
@@ -559,6 +564,22 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		systemPromptTemplate = req.SystemPromptTemplate
 	}
 
+	// Drawdown defaults
+	enableDrawdown := false
+	if req.EnableDrawdownGuard != nil {
+		enableDrawdown = *req.EnableDrawdownGuard
+	}
+	drawdownMinProfit := req.DrawdownMinProfitPct
+	drawdownRetrace := req.DrawdownRetracePct
+	if enableDrawdown {
+		if drawdownMinProfit <= 0 {
+			drawdownMinProfit = 5.0
+		}
+		if drawdownRetrace <= 0 {
+			drawdownRetrace = 40.0
+		}
+	}
+
 	// Set scan interval default value
 	scanIntervalMinutes := req.ScanIntervalMinutes
 	if scanIntervalMinutes < 3 {
@@ -699,6 +720,9 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		ShowInCompetition:    showInCompetition,
 		ScanIntervalMinutes:  scanIntervalMinutes,
 		IsRunning:            false,
+		EnableDrawdownGuard:  enableDrawdown,
+		DrawdownMinProfitPct: drawdownMinProfit,
+		DrawdownRetracePct:   drawdownRetrace,
 	}
 
 	// Save to database
@@ -732,14 +756,17 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 
 // UpdateTraderRequest Update trader request
 type UpdateTraderRequest struct {
-	Name                string  `json:"name" binding:"required"`
-	AIModelID           string  `json:"ai_model_id" binding:"required"`
-	ExchangeID          string  `json:"exchange_id" binding:"required"`
-	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	IsCrossMargin       *bool   `json:"is_cross_margin"`
-	ShowInCompetition   *bool   `json:"show_in_competition"`
+	Name                 string  `json:"name" binding:"required"`
+	AIModelID            string  `json:"ai_model_id" binding:"required"`
+	ExchangeID           string  `json:"exchange_id" binding:"required"`
+	StrategyID           string  `json:"strategy_id"` // Strategy ID (new version)
+	InitialBalance       float64 `json:"initial_balance"`
+	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
+	IsCrossMargin        *bool   `json:"is_cross_margin"`
+	ShowInCompetition    *bool   `json:"show_in_competition"`
+	EnableDrawdownGuard  *bool   `json:"enable_drawdown_guard"`
+	DrawdownMinProfitPct float64 `json:"drawdown_min_profit_pct"`
+	DrawdownRetracePct   float64 `json:"drawdown_retrace_pct"`
 	// The following fields are kept for backward compatibility, new version uses strategy config
 	BTCETHLeverage       int    `json:"btc_eth_leverage"`
 	AltcoinLeverage      int    `json:"altcoin_leverage"`
@@ -747,6 +774,12 @@ type UpdateTraderRequest struct {
 	CustomPrompt         string `json:"custom_prompt"`
 	OverrideBasePrompt   bool   `json:"override_base_prompt"`
 	SystemPromptTemplate string `json:"system_prompt_template"`
+}
+
+type UpdateDrawdownRequest struct {
+	EnableDrawdownGuard  bool    `json:"enable_drawdown_guard"`
+	DrawdownMinProfitPct float64 `json:"drawdown_min_profit_pct"`
+	DrawdownRetracePct   float64 `json:"drawdown_retrace_pct"`
 }
 
 // handleUpdateTrader Update trader configuration
@@ -789,6 +822,27 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	showInCompetition := existingTrader.ShowInCompetition // Keep original value
 	if req.ShowInCompetition != nil {
 		showInCompetition = *req.ShowInCompetition
+	}
+
+	enableDrawdown := existingTrader.EnableDrawdownGuard
+	if req.EnableDrawdownGuard != nil {
+		enableDrawdown = *req.EnableDrawdownGuard
+	}
+	drawdownMinProfit := existingTrader.DrawdownMinProfitPct
+	if req.DrawdownMinProfitPct > 0 {
+		drawdownMinProfit = req.DrawdownMinProfitPct
+	}
+	drawdownRetrace := existingTrader.DrawdownRetracePct
+	if req.DrawdownRetracePct > 0 {
+		drawdownRetrace = req.DrawdownRetracePct
+	}
+	if enableDrawdown {
+		if drawdownMinProfit <= 0 {
+			drawdownMinProfit = 5.0
+		}
+		if drawdownRetrace <= 0 {
+			drawdownRetrace = 40.0
+		}
 	}
 
 	// Set leverage default values
@@ -842,6 +896,9 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		ShowInCompetition:    showInCompetition,
 		ScanIntervalMinutes:  scanIntervalMinutes,
 		IsRunning:            existingTrader.IsRunning, // Keep original value
+		EnableDrawdownGuard:  enableDrawdown,
+		DrawdownMinProfitPct: drawdownMinProfit,
+		DrawdownRetracePct:   drawdownRetrace,
 	}
 
 	// Check if trader was running before update (we'll restart it after)
@@ -892,6 +949,113 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		"ai_model":    req.AIModelID,
 		"message":     "Trader updated successfully",
 	})
+}
+
+// handleUpdateDrawdown updates drawdown guard settings for a trader
+func (s *Server) handleUpdateDrawdown(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	var req UpdateDrawdownRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request parameters")
+		return
+	}
+
+	// Validate trader ownership
+	traders, err := s.store.Trader().List(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get trader list"})
+		return
+	}
+	var existing *store.Trader
+	for _, t := range traders {
+		if t.ID == traderID {
+			existing = t
+			break
+		}
+	}
+	if existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
+		return
+	}
+
+	if req.EnableDrawdownGuard {
+		if req.DrawdownMinProfitPct <= 0 {
+			req.DrawdownMinProfitPct = 5.0
+		}
+		if req.DrawdownRetracePct <= 0 {
+			req.DrawdownRetracePct = 40.0
+		}
+	}
+
+	wasRunning := false
+	if memTrader, err := s.traderManager.GetTrader(traderID); err == nil {
+		status := memTrader.GetStatus()
+		if running, ok := status["is_running"].(bool); ok && running {
+			wasRunning = true
+			memTrader.Stop()
+			s.traderManager.RemoveTrader(traderID)
+		}
+	}
+
+	if err := s.store.Trader().UpdateDrawdown(userID, traderID, req.EnableDrawdownGuard, req.DrawdownMinProfitPct, req.DrawdownRetracePct); err != nil {
+		SafeInternalError(c, "Failed to update drawdown settings", err)
+		return
+	}
+
+	// Reload trader to pick up new config
+	if err := s.traderManager.LoadUserTradersFromStore(s.store, userID); err != nil {
+		logger.Infof("⚠️ Failed to reload traders after drawdown update: %v", err)
+	}
+
+	if wasRunning {
+		if at, err := s.traderManager.GetTrader(traderID); err == nil {
+			go func() {
+				logger.Infof("▶️ Restarting trader %s after drawdown update...", traderID)
+				if runErr := at.Run(); runErr != nil {
+					logger.Infof("❌ Trader %s runtime error: %v", traderID, runErr)
+				}
+			}()
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Drawdown settings updated"})
+}
+
+// handleSyncTraderHistory manually syncs recent history from exchange (binance only for now)
+func (s *Server) handleSyncTraderHistory(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	// Load full config to get exchange + keys
+	fullCfg, err := s.store.Trader().GetFullConfig(userID, traderID)
+	if err != nil || fullCfg == nil || fullCfg.Trader == nil || fullCfg.Exchange == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access"})
+		return
+	}
+
+	if fullCfg.Exchange.ExchangeType != "binance" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Manual sync currently supports Binance only"})
+		return
+	}
+
+	// Force sync window = last 24h
+	startMs := time.Now().UTC().Add(-24 * time.Hour).UnixMilli()
+	binance.ResetSyncState(fullCfg.Exchange.ID, startMs)
+
+	tempTrader := binance.NewFuturesTrader(string(fullCfg.Exchange.APIKey), string(fullCfg.Exchange.SecretKey), userID)
+	if tempTrader == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to init binance trader"})
+		return
+	}
+
+	if syncErr := tempTrader.SyncOrdersFromBinance(traderID, fullCfg.Exchange.ID, fullCfg.Exchange.ExchangeType, s.store); syncErr != nil {
+		SafeInternalError(c, "Failed to sync history", syncErr)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "History synced (last 24h)"})
 }
 
 // handleDeleteTrader Delete trader
