@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/NoFxAiOS/nofx/stargazers"><img src="https://img.shields.io/github/stars/NoFxAiOS/nofx?style=for-the-badge" alt="Stars"></a>
-  <a href="https://github.com/NoFxAiOS/nofx/releases"><img src="https://img.shields.io/github/v/release/NoFxAiOS/nofx?style=for-the-badge" alt="Release"></a>
-  <a href="https://github.com/NoFxAiOS/nofx/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/TG7744/nofx20260206/stargazers"><img src="https://img.shields.io/github/stars/TG7744/nofx20260206?style=for-the-badge" alt="Stars"></a>
+  <a href="https://github.com/TG7744/nofx20260206/releases"><img src="https://img.shields.io/github/v/release/TG7744/nofx20260206?style=for-the-badge" alt="Release"></a>
+  <a href="https://github.com/TG7744/nofx20260206/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="License"></a>
   <a href="https://t.me/nofx_dev_community"><img src="https://img.shields.io/badge/Telegram-Community-blue?style=for-the-badge&logo=telegram" alt="Telegram"></a>
 </p>
 
@@ -153,10 +153,15 @@ To use NOFX, you'll need:
 
 **Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/main/install.sh | bash
 ```
 
 That's it! Open **http://127.0.0.1:3000** in your browser.
+
+Dev/Test (dev 分支):
+```bash
+curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/dev/install-dev.sh | bash
+```
 
 ### One-Click Cloud Deploy (Railway)
 
@@ -170,7 +175,7 @@ After deployment, Railway will provide a public URL to access your NOFX instance
 
 ```bash
 # Download and start
-curl -O https://raw.githubusercontent.com/NoFxAiOS/nofx/main/docker-compose.prod.yml
+curl -O https://raw.githubusercontent.com/TG7744/nofx20260206/main/docker-compose.prod.yml
 docker compose -f docker-compose.prod.yml up -d
 ```
 
@@ -189,7 +194,7 @@ docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compo
 > **💡 Updates are frequent.** Run this command daily to stay current with the latest features and fixes:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/main/install.sh | bash
 ```
 
 This one-liner pulls the latest official images and restarts services automatically.
@@ -215,7 +220,7 @@ sudo apt-get install libta-lib0-dev
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/NoFxAiOS/nofx.git
+git clone https://github.com/TG7744/nofx20260206.git
 cd nofx
 
 # 2. Install backend dependencies
@@ -251,7 +256,7 @@ Access Web Interface: **http://127.0.0.1:3000**
 2. **Run NOFX**
    ```powershell
    # Open PowerShell and run:
-   curl -o docker-compose.prod.yml https://raw.githubusercontent.com/NoFxAiOS/nofx/main/docker-compose.prod.yml
+   curl -o docker-compose.prod.yml https://raw.githubusercontent.com/TG7744/nofx20260206/main/docker-compose.prod.yml
    docker compose -f docker-compose.prod.yml up -d
    ```
 
@@ -294,9 +299,9 @@ Access Web Interface: **http://127.0.0.1:3000**
    ```
 
 4. **Clone and Run NOFX**
-   ```bash
-   git clone https://github.com/NoFxAiOS/nofx.git
-   cd nofx
+```bash
+git clone https://github.com/TG7744/nofx20260206.git
+cd nofx
 
    # Build and run backend
    go build -o nofx && ./nofx
@@ -315,7 +320,7 @@ Access Web Interface: **http://127.0.0.1:3000**
 
 2. **Run from WSL2 terminal**
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/main/install.sh | bash
    ```
 
 ---
@@ -328,7 +333,7 @@ By default, transport encryption is **disabled**, allowing you to access NOFX vi
 
 ```bash
 # Deploy to your server
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/main/install.sh | bash
 ```
 
 Access via `http://YOUR_SERVER_IP:3000` - works immediately.
@@ -478,7 +483,7 @@ We welcome contributions! See:
 
 All contributions are tracked on GitHub. When NOFX generates revenue, contributors will receive airdrops based on their contributions.
 
-**PRs that resolve [Pinned Issues](https://github.com/NoFxAiOS/nofx/issues) receive the HIGHEST rewards!**
+**PRs that resolve [Pinned Issues](https://github.com/TG7744/nofx20260206/issues) receive the HIGHEST rewards!**
 
 | Contribution Type | Weight |
 |------------------|:------:|
@@ -493,7 +498,7 @@ All contributions are tracked on GitHub. When NOFX generates revenue, contributo
 
 ## Contact
 
-- **GitHub Issues**: [Submit an Issue](https://github.com/NoFxAiOS/nofx/issues)
+- **GitHub Issues**: [Submit an Issue](https://github.com/TG7744/nofx20260206/issues)
 - **Developer Community**: [Telegram Group](https://t.me/nofx_dev_community)
 
 ---
@@ -520,4 +525,4 @@ Thanks to all our sponsors!
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=NoFxAiOS/nofx&type=Date)](https://star-history.com/#NoFxAiOS/nofx&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=TG7744/nofx20260206&type=Date)](https://star-history.com/#TG7744/nofx20260206&Date)

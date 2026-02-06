@@ -1,23 +1,21 @@
-# NOFX Production Deployment (stable)
-# Stable prebuilt images
+# NOFX Development/Test Deployment
+# Using test images for dev validation
 #
-# One-click install (stable):
-#   curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/main/install.sh | bash
-#
+# One-click install (dev):
+#   curl -fsSL https://raw.githubusercontent.com/TG7744/nofx20260206/dev/install-dev.sh | bash
 # Manual:
-#   curl -O https://raw.githubusercontent.com/TG7744/nofx20260206/main/docker-compose.prod.yml
-#   docker compose -f docker-compose.prod.yml up -d
+#   curl -O https://raw.githubusercontent.com/TG7744/nofx20260206/dev/docker-compose.dev.yml
+#   docker compose -f docker-compose.dev.yml up -d
 
 services:
   nofx:
-    image: small147/nofx20260206:backend-latest
-    container_name: nofx-trading
+    image: small147/nofx20260204:backend-test
+    container_name: nofx-trading-dev
     restart: unless-stopped
     stop_grace_period: 30s
     ports:
       - "${NOFX_BACKEND_PORT:-8080}:8080"
     volumes:
-      # Data directory for database and logs
       - ./data:/app/data
       - /etc/localtime:/etc/localtime:ro
     env_file:
@@ -35,8 +33,8 @@ services:
       start_period: 60s
 
   nofx-frontend:
-    image: small147/nofx20260206:frontend-latest
-    container_name: nofx-frontend
+    image: small147/nofx20260206:frontend-test
+    container_name: nofx-frontend-dev
     restart: unless-stopped
     ports:
       - "${NOFX_FRONTEND_PORT:-3000}:80"
