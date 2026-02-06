@@ -31,6 +31,7 @@ import (
 	"nofx/trader/okx"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,8 @@ type Server struct {
 	debateHandler   *DebateHandler
 	httpServer      *http.Server
 	port            int
+	scheduleTimers  map[string]*time.Timer
+	scheduleMu      sync.Mutex
 }
 
 // NewServer Creates API server
@@ -78,6 +81,7 @@ func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoServ
 		backtestManager: backtestManager,
 		debateHandler:   debateHandler,
 		port:            port,
+		scheduleTimers:  make(map[string]*time.Timer),
 	}
 
 	// Setup routes
@@ -162,6 +166,8 @@ func (s *Server) setupRoutes() {
 			protected.DELETE("/traders/:id", s.handleDeleteTrader)
 			protected.POST("/traders/:id/start", s.handleStartTrader)
 			protected.POST("/traders/:id/stop", s.handleStopTrader)
+			protected.POST("/traders/:id/schedule-start", s.handleScheduleStartTrader)
+			protected.POST("/traders/:id/schedule-start/cancel", s.handleCancelScheduleStart)
 			protected.POST("/traders/:id/drawdown", s.handleUpdateDrawdown)
 			protected.POST("/traders/:id/sync-history", s.handleSyncTraderHistory)
 			protected.PUT("/traders/:id/prompt", s.handleUpdateTraderPrompt)
@@ -782,6 +788,10 @@ type UpdateDrawdownRequest struct {
 	DrawdownRetracePct   float64 `json:"drawdown_retrace_pct"`
 }
 
+type ScheduleStartRequest struct {
+	ScheduledTime string `json:"scheduled_time"` // RFC3339 timestamp (UTC)
+}
+
 // handleUpdateTrader Update trader configuration
 func (s *Server) handleUpdateTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -1023,6 +1033,74 @@ func (s *Server) handleUpdateDrawdown(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Drawdown settings updated"})
 }
 
+// handleScheduleStartTrader schedules a trader to start at a future time
+func (s *Server) handleScheduleStartTrader(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	var req ScheduleStartRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.ScheduledTime == "" {
+		SafeBadRequest(c, "Invalid scheduled_time")
+		return
+	}
+
+	t, err := time.Parse(time.RFC3339, req.ScheduledTime)
+	if err != nil {
+		SafeBadRequest(c, "scheduled_time must be RFC3339")
+		return
+	}
+	if t.Before(time.Now().Add(30 * time.Second)) {
+		SafeBadRequest(c, "scheduled_time must be in the future")
+		return
+	}
+
+	// Persist schedule
+	if err := s.store.Trader().UpdateScheduleStart(userID, traderID, &t); err != nil {
+		SafeInternalError(c, "Failed to save schedule", err)
+		return
+	}
+
+	// Reset existing timer and set a new one
+	s.cancelScheduleTimer(traderID)
+	delay := time.Until(t)
+	s.scheduleMu.Lock()
+	s.scheduleTimers[traderID] = time.AfterFunc(delay, func() {
+		if err := s.startTraderInternal(userID, traderID); err != nil {
+			logger.Infof("❌ Scheduled start failed for trader %s: %v", traderID, err)
+		} else {
+			logger.Infof("⏱️ Trader %s started by scheduler at %s", traderID, t.Format(time.RFC3339))
+			_ = s.store.Trader().UpdateScheduleStart(userID, traderID, nil)
+		}
+		s.cancelScheduleTimer(traderID)
+	})
+	s.scheduleMu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{"message": "Scheduled"})
+}
+
+// handleCancelScheduleStart cancels any pending scheduled start for a trader
+func (s *Server) handleCancelScheduleStart(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	s.cancelScheduleTimer(traderID)
+	if err := s.store.Trader().UpdateScheduleStart(userID, traderID, nil); err != nil {
+		SafeInternalError(c, "Failed to cancel schedule", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Schedule canceled"})
+}
+
+// cancelScheduleTimer stops and removes in-memory timer for a trader
+func (s *Server) cancelScheduleTimer(traderID string) {
+	s.scheduleMu.Lock()
+	defer s.scheduleMu.Unlock()
+	if timer, ok := s.scheduleTimers[traderID]; ok && timer != nil {
+		timer.Stop()
+		delete(s.scheduleTimers, traderID)
+	}
+}
+
 // handleSyncTraderHistory manually syncs recent history from exchange (binance only for now)
 func (s *Server) handleSyncTraderHistory(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -1091,11 +1169,31 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
 	traderID := c.Param("id")
 
+	if err := s.startTraderInternal(userID, traderID); err != nil {
+		// Map known errors to HTTP codes/messages
+		if strings.Contains(err.Error(), "already running") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Trader is already running"})
+		} else if strings.Contains(err.Error(), "does not exist") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Trader started"})
+}
+
+// startTraderInternal encapsulates start flow so scheduler can reuse it
+func (s *Server) startTraderInternal(userID, traderID string) error {
+	// If a schedule existed, clear it to avoid double trigger
+	s.cancelScheduleTimer(traderID)
+	_ = s.store.Trader().UpdateScheduleStart(userID, traderID, nil)
+
 	// Verify trader belongs to current user
 	_, err := s.store.Trader().GetFullConfig(userID, traderID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
-		return
+		return fmt.Errorf("Trader does not exist or no access permission")
 	}
 
 	// Check if trader exists in memory and if it's running
@@ -1103,8 +1201,7 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 	if existingTrader != nil {
 		status := existingTrader.GetStatus()
 		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Trader is already running"})
-			return
+			return fmt.Errorf("trader is already running")
 		}
 		// Trader exists but is stopped - remove from memory to reload fresh config
 		logger.Infof("🔄 Removing stopped trader %s from memory to reload config...", traderID)
@@ -1115,8 +1212,7 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 	logger.Infof("🔄 Loading trader %s from database...", traderID)
 	if loadErr := s.traderManager.LoadUserTradersFromStore(s.store, userID); loadErr != nil {
 		logger.Infof("❌ Failed to load user traders: %v", loadErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load trader: " + loadErr.Error()})
-		return
+		return fmt.Errorf("failed to load trader: %w", loadErr)
 	}
 
 	trader, err := s.traderManager.GetTrader(traderID)
@@ -1126,35 +1222,28 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 		if fullCfg != nil && fullCfg.Trader != nil {
 			// Check strategy
 			if fullCfg.Strategy == nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Trader has no strategy configured, please create a strategy in Strategy Studio and associate it with the trader"})
-				return
+				return fmt.Errorf("Trader has no strategy configured, please create a strategy in Strategy Studio and associate it with the trader")
 			}
 			// Check AI model
 			if fullCfg.AIModel == nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's AI model does not exist, please check AI model configuration"})
-				return
+				return fmt.Errorf("Trader's AI model does not exist, please check AI model configuration")
 			}
 			if !fullCfg.AIModel.Enabled {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's AI model is not enabled, please enable the AI model first"})
-				return
+				return fmt.Errorf("Trader's AI model is not enabled, please enable the AI model first")
 			}
 			// Check exchange
 			if fullCfg.Exchange == nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's exchange does not exist, please check exchange configuration"})
-				return
+				return fmt.Errorf("Trader's exchange does not exist, please check exchange configuration")
 			}
 			if !fullCfg.Exchange.Enabled {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's exchange is not enabled, please enable the exchange first"})
-				return
+				return fmt.Errorf("Trader's exchange is not enabled, please enable the exchange first")
 			}
 		}
 		// Check if there's a specific load error
 		if loadErr := s.traderManager.GetLoadError(traderID); loadErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load trader: " + loadErr.Error()})
-			return
+			return fmt.Errorf("Failed to load trader: %w", loadErr)
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "Failed to load trader, please check AI model, exchange and strategy configuration"})
-		return
+		return fmt.Errorf("Failed to load trader, please check AI model, exchange and strategy configuration")
 	}
 
 	// Start trader
@@ -1172,13 +1261,16 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 	}
 
 	logger.Infof("✓ Trader %s started", trader.GetName())
-	c.JSON(http.StatusOK, gin.H{"message": "Trader started"})
+	return nil
 }
 
 // handleStopTrader Stop trader
 func (s *Server) handleStopTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
 	traderID := c.Param("id")
+
+	// If there's a pending schedule, clear it when manually stopped
+	s.cancelScheduleTimer(traderID)
 
 	// Verify trader belongs to current user
 	_, err := s.store.Trader().GetFullConfig(userID, traderID)
@@ -2274,6 +2366,11 @@ func (s *Server) handleTraderList(c *gin.Context) {
 			"initial_balance":     trader.InitialBalance,
 			"strategy_id":         trader.StrategyID,
 			"strategy_name":       strategyName,
+			// Drawdown guard settings (frontend needs latest state to render toggle correctly)
+			"enable_drawdown_guard":   trader.EnableDrawdownGuard,
+			"drawdown_min_profit_pct": trader.DrawdownMinProfitPct,
+			"drawdown_retrace_pct":    trader.DrawdownRetracePct,
+			"scheduled_start_at":      trader.ScheduledStartAt,
 		})
 	}
 

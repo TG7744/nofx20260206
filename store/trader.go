@@ -31,11 +31,13 @@ type Trader struct {
 	IsCrossMargin       bool    `gorm:"column:is_cross_margin;default:true" json:"is_cross_margin"`
 	ShowInCompetition   bool    `gorm:"column:show_in_competition;default:true" json:"show_in_competition"`
 	// Drawdown guard (per-trader)
-	EnableDrawdownGuard  bool      `gorm:"column:enable_drawdown_guard;default:false" json:"enable_drawdown_guard"`
-	DrawdownMinProfitPct float64   `gorm:"column:drawdown_min_profit_pct;default:0" json:"drawdown_min_profit_pct"`
-	DrawdownRetracePct   float64   `gorm:"column:drawdown_retrace_pct;default:0" json:"drawdown_retrace_pct"`
-	CreatedAt            time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt            time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	EnableDrawdownGuard  bool    `gorm:"column:enable_drawdown_guard;default:false" json:"enable_drawdown_guard"`
+	DrawdownMinProfitPct float64 `gorm:"column:drawdown_min_profit_pct;default:0" json:"drawdown_min_profit_pct"`
+	DrawdownRetracePct   float64 `gorm:"column:drawdown_retrace_pct;default:0" json:"drawdown_retrace_pct"`
+	// Scheduled start time (UTC RFC3339), if set the backend scheduler will attempt to auto-start trader
+	ScheduledStartAt *time.Time `gorm:"column:scheduled_start_at" json:"scheduled_start_at,omitempty"`
+	CreatedAt        time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 
 	// Following fields are deprecated, kept for backward compatibility, new traders should use StrategyID
 	BTCETHLeverage       int    `gorm:"column:btc_eth_leverage;default:5" json:"btc_eth_leverage,omitempty"`
@@ -109,6 +111,13 @@ func (s *TraderStore) UpdateDrawdown(userID, id string, enable bool, minProfit, 
 			"drawdown_min_profit_pct": minProfit,
 			"drawdown_retrace_pct":    retrace,
 		}).Error
+}
+
+// UpdateScheduleStart sets or clears scheduled_start_at
+func (s *TraderStore) UpdateScheduleStart(userID, id string, schedule *time.Time) error {
+	return s.db.Model(&Trader{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Update("scheduled_start_at", schedule).Error
 }
 
 // Update updates trader configuration
