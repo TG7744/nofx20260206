@@ -160,6 +160,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   const [visibleExchangeAddresses, setVisibleExchangeAddresses] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [scheduleTimes, setScheduleTimes] = useState<Record<string, string>>({})
+  const [schedulePickerTrader, setSchedulePickerTrader] = useState<string | null>(null)
   // Drawdown guard form
   const [ddTraderId, setDdTraderId] = useState<string | null>(null)
   const [ddEnabled, setDdEnabled] = useState(false)
@@ -531,6 +532,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         error: language === 'zh' ? '预约失败' : 'Schedule failed',
       })
       await mutateTraders()
+      setSchedulePickerTrader(null)
     } catch (error) {
       console.error('Failed to schedule start:', error)
       toast.error(language === 'zh' ? '预约失败' : 'Schedule failed')
@@ -545,9 +547,22 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         error: language === 'zh' ? '取消失败' : 'Cancel failed',
       })
       await mutateTraders()
+      if (schedulePickerTrader === traderId) {
+        setSchedulePickerTrader(null)
+      }
     } catch (error) {
       console.error('Failed to cancel schedule:', error)
       toast.error(language === 'zh' ? '取消失败' : 'Cancel failed')
+    }
+  }
+
+  // Toggle schedule UI: first click shows time picker, second click confirms
+  const handleScheduleClick = (traderId: string, isRunning?: boolean) => {
+    if (isRunning) return
+    if (schedulePickerTrader === traderId) {
+      void openScheduleForTrader(traderId)
+    } else {
+      setSchedulePickerTrader(traderId)
     }
   }
 
@@ -1448,27 +1463,36 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       <div className="flex items-center gap-1">
                         {!trader.scheduled_start_at ? (
                           <>
-                            <input
-                              type="time"
-                              value={scheduleTimes[trader.trader_id] || '09:15'}
-                              onChange={(e) =>
-                                setScheduleTimes((prev: Record<string, string>) => ({
-                                  ...prev,
-                                  [trader.trader_id]: e.target.value || '09:15',
-                                }))
-                              }
-                              className="px-2 py-1 rounded text-xs md:text-sm border border-gray-700 bg-transparent text-white w-[90px]"
-                            />
+                            {schedulePickerTrader === trader.trader_id && !trader.is_running && (
+                              <input
+                                type="time"
+                                value={scheduleTimes[trader.trader_id] || '09:15'}
+                                onChange={(e) =>
+                                  setScheduleTimes((prev: Record<string, string>) => ({
+                                    ...prev,
+                                    [trader.trader_id]: e.target.value || '09:15',
+                                  }))
+                                }
+                                className="px-2 py-1 rounded text-xs md:text-sm border border-gray-700 bg-transparent text-white w-[90px]"
+                              />
+                            )}
                             <button
-                              onClick={() => openScheduleForTrader(trader.trader_id)}
-                              className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap flex items-center gap-1"
+                              disabled={trader.is_running}
+                              onClick={() => handleScheduleClick(trader.trader_id, trader.is_running)}
+                              className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 whitespace-nowrap flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                               style={{
                                 background: 'rgba(99, 102, 241, 0.1)',
                                 color: '#6366F1',
                               }}
                             >
                               <Clock className="w-3 h-3 md:w-4 md:h-4" />
-                              {language === 'zh' ? '定时启动' : 'Schedule'}
+                              {schedulePickerTrader === trader.trader_id
+                                ? language === 'zh'
+                                  ? '确认定时'
+                                  : 'Confirm'
+                                : language === 'zh'
+                                  ? '定时启动'
+                                  : 'Schedule'}
                             </button>
                           </>
                         ) : (
