@@ -45,6 +45,12 @@
 - **Web-Based Config**: No JSON editing - configure everything through the web interface
 - **Real-Time Dashboard**: Live positions, P/L tracking, AI decision logs with Chain of Thought
 
+### What's New (Feb 2026)
+
+- New decision action `update_tp_sl`: AI can adjust stop-loss/take-profit on existing positions; executor cancels old TP/SL then re-sets with the same size.
+- Binance TP/SL injection: AI context now includes your live stop-loss/take-profit per position (pulled from open orders), so reasoning reflects the actual protective orders already on the book.
+- JSON output rule hardened: if you need approximation, prefix the number with the Chinese “约”; never use symbols like `~` or `≈` to avoid parsing issues.
+
 ### Core Team
 
 - **Tinkle** - [@Web3Tinkle](https://x.com/Web3Tinkle)

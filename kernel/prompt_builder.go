@@ -110,6 +110,7 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
 - **take_profit**: 止盈价格（开新仓时建议提供）
 - **confidence**: 信心度（0-100）
 - **reasoning**: 推理过程（必需，必须详细说明决策依据）
+- **禁止**在任何字段中使用“~”“≈”等近似符号；若需表达近似，请使用中文“约”置于数字前（如“约10500”）
 
 ## 重要提醒
 
@@ -139,6 +140,7 @@ func (pb *PromptBuilder) getDecisionRequirementsZH() string {
    - 是否触发止损条件？
    - 是否触发跟踪止盈条件？
    - 是否适合加仓？
+   - 持仓信息已包含当前止损/止盈价格，可直接用于调整或平仓决策
 
 3. **分析候选币种**（如果有）:
    - 技术形态是否符合进场条件？

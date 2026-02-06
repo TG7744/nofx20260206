@@ -44,13 +44,13 @@ type AutoTraderConfig struct {
 	BybitSecretKey string
 
 	// OKX API configuration
-	OKXAPIKey    string
-	OKXSecretKey string
+	OKXAPIKey     string
+	OKXSecretKey  string
 	OKXPassphrase string
 
 	// Bitget API configuration
-	BitgetAPIKey    string
-	BitgetSecretKey string
+	BitgetAPIKey     string
+	BitgetSecretKey  string
 	BitgetPassphrase string
 
 	// Gate API configuration
@@ -58,8 +58,8 @@ type AutoTraderConfig struct {
 	GateSecretKey string
 
 	// KuCoin API configuration
-	KuCoinAPIKey    string
-	KuCoinSecretKey string
+	KuCoinAPIKey     string
+	KuCoinSecretKey  string
 	KuCoinPassphrase string
 
 	// Hyperliquid configuration
@@ -121,9 +121,9 @@ type AutoTrader struct {
 	config                AutoTraderConfig
 	trader                Trader // Use Trader interface (supports multiple platforms)
 	mcpClient             mcp.AIClient
-	store                 *store.Store             // Data storage (decision records, etc.)
+	store                 *store.Store           // Data storage (decision records, etc.)
 	strategyEngine        *kernel.StrategyEngine // Strategy engine (uses strategy configuration)
-	cycleNumber           int                      // Current cycle number
+	cycleNumber           int                    // Current cycle number
 	initialBalance        float64
 	dailyPnL              float64
 	customPrompt          string // Custom trading strategy prompt
@@ -848,11 +848,26 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		peakPnlPct := at.peakPnLCache[posKey]
 		at.peakPnLCacheMutex.RUnlock()
 
+		// Fetch existing TP/SL from exchange (Binance supports structured fetch here)
+		stopLossPrice := 0.0
+		takeProfitPrice := 0.0
+		if bTrader, ok := at.trader.(*binance.FuturesTrader); ok {
+			sl, tp, err := bTrader.GetTPSL(symbol, strings.ToUpper(side), markPrice)
+			if err != nil {
+				logger.Infof("⚠️ [%s] Failed to get TP/SL for %s %s: %v", at.name, symbol, side, err)
+			} else {
+				stopLossPrice = sl
+				takeProfitPrice = tp
+			}
+		}
+
 		positionInfos = append(positionInfos, kernel.PositionInfo{
 			Symbol:           symbol,
 			Side:             side,
 			EntryPrice:       entryPrice,
 			MarkPrice:        markPrice,
+			StopLoss:         stopLossPrice,
+			TakeProfit:       takeProfitPrice,
 			Quantity:         quantity,
 			Leverage:         leverage,
 			UnrealizedPnL:    unrealizedPnl,
@@ -1048,6 +1063,8 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *kernel.Decision, actio
 		return at.executeCloseLongWithRecord(decision, actionRecord)
 	case "close_short":
 		return at.executeCloseShortWithRecord(decision, actionRecord)
+	case "update_tp_sl":
+		return at.executeUpdateTPAndSL(decision, actionRecord)
 	case "hold", "wait":
 		// No execution needed, just record
 		return nil
@@ -1080,6 +1097,101 @@ func (at *AutoTrader) ExecuteDecision(d *kernel.Decision) error {
 	}
 
 	logger.Infof("[%s] External decision executed successfully: %s %s", at.name, d.Action, d.Symbol)
+	return nil
+}
+
+// executeUpdateTPAndSL adjusts stop loss / take profit for an existing position
+func (at *AutoTrader) executeUpdateTPAndSL(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
+	logger.Infof("  ♻️ Update TP/SL: %s", decision.Symbol)
+
+	// Validate input (defensive, should be filtered by validator already)
+	if decision.StopLoss <= 0 && decision.TakeProfit <= 0 {
+		return fmt.Errorf("update_tp_sl requires stop_loss or take_profit")
+	}
+
+	// Determine target side by price relationship (default long)
+	positionSide := "LONG"
+	if decision.StopLoss > 0 && decision.TakeProfit > 0 && decision.StopLoss > decision.TakeProfit {
+		positionSide = "SHORT"
+	}
+
+	// Capture current price for record (best effort)
+	if marketData, err := market.GetWithExchange(decision.Symbol, at.exchange); err == nil {
+		actionRecord.Price = marketData.CurrentPrice
+	}
+
+	normalizedSymbol := market.Normalize(decision.Symbol)
+
+	// Get position quantity (prefer local store for accuracy)
+	var quantity float64
+	if at.store != nil {
+		sideLabel := "LONG"
+		if positionSide == "SHORT" {
+			sideLabel = "SHORT"
+		}
+		if openPos, err := at.store.Position().GetOpenPositionBySymbol(at.id, normalizedSymbol, sideLabel); err == nil && openPos != nil {
+			quantity = openPos.Quantity
+			logger.Infof("  📊 Using local position data for TP/SL update: qty=%.8f", quantity)
+		}
+	}
+
+	// Fallback to exchange positions
+	if quantity == 0 {
+		if positions, err := at.trader.GetPositions(); err == nil {
+			for _, pos := range positions {
+				if pos["symbol"] != decision.Symbol {
+					continue
+				}
+				if side, ok := pos["side"].(string); ok {
+					if positionSide == "LONG" && side == "long" {
+						if amt, ok := pos["positionAmt"].(float64); ok && amt > 0 {
+							quantity = amt
+							break
+						}
+					}
+					if positionSide == "SHORT" && side == "short" {
+						if amt, ok := pos["positionAmt"].(float64); ok && amt < 0 {
+							quantity = -amt // abs
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if quantity <= 0 {
+		return fmt.Errorf("no %s position found for %s to update TP/SL", strings.ToLower(positionSide), decision.Symbol)
+	}
+
+	// Cancel existing TP/SL orders before setting new ones
+	if err := at.trader.CancelStopOrders(decision.Symbol); err != nil {
+		logger.Infof("  ⚠️ Failed to cancel stop orders in one call: %v (trying split cancel)", err)
+		if errSL := at.trader.CancelStopLossOrders(decision.Symbol); errSL != nil {
+			logger.Infof("  ⚠️ Failed to cancel stop loss orders: %v", errSL)
+		}
+		if errTP := at.trader.CancelTakeProfitOrders(decision.Symbol); errTP != nil {
+			logger.Infof("  ⚠️ Failed to cancel take profit orders: %v", errTP)
+		}
+	}
+
+	// Re-set stop loss / take profit (only the fields that are provided)
+	if decision.StopLoss > 0 {
+		if err := at.trader.SetStopLoss(decision.Symbol, positionSide, quantity, decision.StopLoss); err != nil {
+			logger.Infof("  ⚠ Failed to set stop loss: %v", err)
+		}
+	}
+	if decision.TakeProfit > 0 {
+		if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, quantity, decision.TakeProfit); err != nil {
+			logger.Infof("  ⚠ Failed to set take profit: %v", err)
+		}
+	}
+
+	actionRecord.StopLoss = decision.StopLoss
+	actionRecord.TakeProfit = decision.TakeProfit
+	actionRecord.Action = "update_tp_sl"
+
+	logger.Infof("  ✓ TP/SL update submitted for %s (%s) qty=%.8f", decision.Symbol, strings.ToLower(positionSide), quantity)
 	return nil
 }
 
@@ -2180,22 +2292,22 @@ func (at *AutoTrader) recordOrderFill(orderRecordID int64, exchangeOrderID, symb
 	normalizedSymbol := market.Normalize(symbol)
 
 	fill := &store.TraderFill{
-		TraderID:         at.id,
-		ExchangeID:       at.exchangeID,
-		ExchangeType:     at.exchange,
-		OrderID:          orderRecordID,
-		ExchangeOrderID:  exchangeOrderID,
-		ExchangeTradeID:  tradeID,
-		Symbol:           normalizedSymbol,
-		Side:             side,
-		Price:            price,
-		Quantity:         quantity,
-		QuoteQuantity:    price * quantity,
-		Commission:       fee,
-		CommissionAsset:  "USDT",
-		RealizedPnL:      0, // Will be calculated for close orders
-		IsMaker:          false, // Market orders are usually taker
-		CreatedAt:        time.Now().UTC().UnixMilli(),
+		TraderID:        at.id,
+		ExchangeID:      at.exchangeID,
+		ExchangeType:    at.exchange,
+		OrderID:         orderRecordID,
+		ExchangeOrderID: exchangeOrderID,
+		ExchangeTradeID: tradeID,
+		Symbol:          normalizedSymbol,
+		Side:            side,
+		Price:           price,
+		Quantity:        quantity,
+		QuoteQuantity:   price * quantity,
+		Commission:      fee,
+		CommissionAsset: "USDT",
+		RealizedPnL:     0,     // Will be calculated for close orders
+		IsMaker:         false, // Market orders are usually taker
+		CreatedAt:       time.Now().UTC().UnixMilli(),
 	}
 
 	// Calculate realized PnL for close orders
@@ -2323,4 +2435,3 @@ func getSideFromAction(action string) string {
 func (at *AutoTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	return at.trader.GetOpenOrders(symbol)
 }
-

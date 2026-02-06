@@ -100,6 +100,57 @@ func TestLeverageFallback(t *testing.T) {
 	}
 }
 
+func TestUpdateTPSLValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		decision  Decision
+		wantError bool
+	}{
+		{
+			name: "Valid update with both prices",
+			decision: Decision{
+				Symbol:     "BTCUSDT",
+				Action:     "update_tp_sl",
+				StopLoss:   90000,
+				TakeProfit: 110000,
+			},
+			wantError: false,
+		},
+		{
+			name: "Invalid update with neither price",
+			decision: Decision{
+				Symbol: "BTCUSDT",
+				Action: "update_tp_sl",
+			},
+			wantError: true,
+		},
+		{
+			name: "Invalid update with equal prices",
+			decision: Decision{
+				Symbol:     "BTCUSDT",
+				Action:     "update_tp_sl",
+				StopLoss:   100,
+				TakeProfit: 100,
+			},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDecision(&tt.decision, 1000, 10, 5, 10.0, 1.5)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
 
 // contains checks if string contains substring (helper function)
 func contains(s, substr string) bool {

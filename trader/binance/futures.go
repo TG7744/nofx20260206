@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"nofx/hook"
 	"nofx/logger"
 	"nofx/trader/types"
@@ -952,6 +953,70 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 	}
 
 	return result, nil
+}
+
+// GetTPSL returns current stop loss / take profit prices for a symbol + position side (LONG/SHORT).
+// It inspects open conditional orders (legacy + algo). If multiple exist, picks the one closest to current mark price.
+func (t *FuturesTrader) GetTPSL(symbol, positionSide string, markPrice float64) (stopLoss, takeProfit float64, err error) {
+	orders, err := t.GetOpenOrders(symbol)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	sideUpper := strings.ToUpper(positionSide)
+	const (
+		orderStopLoss   = "SL"
+		orderTakeProfit = "TP"
+	)
+
+	best := map[string]struct {
+		price float64
+		dist  float64
+	}{
+		orderStopLoss:   {price: 0, dist: math.MaxFloat64},
+		orderTakeProfit: {price: 0, dist: math.MaxFloat64},
+	}
+
+	for _, o := range orders {
+		if strings.ToUpper(o.PositionSide) != sideUpper {
+			continue
+		}
+
+		price := o.StopPrice
+		if price <= 0 {
+			price = o.Price
+		}
+		if price <= 0 {
+			continue
+		}
+
+		otype := strings.ToUpper(o.Type)
+		var kind string
+		switch otype {
+		case "STOP", "STOP_MARKET", "STOP_LOSS", "STOP_LOSS_LIMIT":
+			kind = orderStopLoss
+		case "TAKE_PROFIT", "TAKE_PROFIT_MARKET", "TAKE_PROFIT_LIMIT":
+			kind = orderTakeProfit
+		default:
+			continue
+		}
+
+		dist := math.Abs(price - markPrice)
+		if dist < best[kind].dist {
+			best[kind] = struct {
+				price float64
+				dist  float64
+			}{price: price, dist: dist}
+		}
+	}
+
+	if best[orderStopLoss].price > 0 {
+		stopLoss = best[orderStopLoss].price
+	}
+	if best[orderTakeProfit].price > 0 {
+		takeProfit = best[orderTakeProfit].price
+	}
+	return
 }
 
 // GetMarketPrice gets market price
