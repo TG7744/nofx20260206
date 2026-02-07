@@ -28,6 +28,7 @@ type Exchange struct {
 	PaperFeeRate            float64                `gorm:"column:paper_fee_rate;default:0.0004" json:"paper_fee_rate,omitempty"`
 	PaperSlippageBps        float64                `gorm:"column:paper_slippage_bps;default:2" json:"paper_slippage_bps,omitempty"`
 	PaperPriceSource        string                 `gorm:"column:paper_price_source;default:'binance'" json:"paper_price_source,omitempty"` // binance / mock
+	PaperInitialBalance     float64                `gorm:"column:paper_initial_balance;default:10000" json:"paper_initial_balance,omitempty"`
 	APIKey                  crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
 	SecretKey               crypto.EncryptedString `gorm:"column:secret_key;default:''" json:"secretKey"`
 	Passphrase              crypto.EncryptedString `gorm:"column:passphrase;default:''" json:"passphrase"`
@@ -154,19 +155,20 @@ func (s *ExchangeStore) EnsurePaperExchange(userID string) (*Exchange, error) {
 	// Create default paper exchange
 	id := uuid.New().String()
 	paper := &Exchange{
-		ID:               id,
-		ExchangeType:     "paper",
-		AccountName:      "Paper",
-		UserID:           userID,
-		Name:             "Paper Trading",
-		Type:             "paper",
-		Enabled:          true,
-		Testnet:          false,
-		PaperFeeRate:     0.0004,
-		PaperSlippageBps: 2,
-		PaperPriceSource: "binance",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
+		ID:                  id,
+		ExchangeType:        "paper",
+		AccountName:         "Paper",
+		UserID:              userID,
+		Name:                "Paper Trading",
+		Type:                "paper",
+		Enabled:             true,
+		Testnet:             false,
+		PaperFeeRate:        0.0004,
+		PaperSlippageBps:    2,
+		PaperPriceSource:    "binance",
+		PaperInitialBalance: 10000,
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 	if err := s.db.Create(paper).Error; err != nil {
 		return nil, err
@@ -221,7 +223,7 @@ func getExchangeNameAndType(exchangeType string) (name string, typ string) {
 
 // Create creates a new exchange account with UUID
 func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled bool,
-	paperFeeRate, paperSlippageBps float64, paperPriceSource string,
+	paperFeeRate, paperSlippageBps float64, paperPriceSource string, paperInitialBalance float64,
 	apiKey, secretKey, passphrase string, testnet bool,
 	hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey,
 	lighterWalletAddr, lighterPrivateKey, lighterApiKeyPrivateKey string, lighterApiKeyIndex int) (string, error) {
@@ -247,6 +249,7 @@ func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled
 		PaperFeeRate:            paperFeeRate,
 		PaperSlippageBps:        paperSlippageBps,
 		PaperPriceSource:        paperPriceSource,
+		PaperInitialBalance:     paperInitialBalance,
 		APIKey:                  crypto.EncryptedString(apiKey),
 		SecretKey:               crypto.EncryptedString(secretKey),
 		Passphrase:              crypto.EncryptedString(passphrase),
@@ -269,7 +272,7 @@ func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled
 
 // Update updates exchange configuration by UUID
 func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKey, passphrase string, testnet bool,
-	paperFeeRate, paperSlippageBps float64, paperPriceSource string,
+	paperFeeRate, paperSlippageBps float64, paperPriceSource string, paperInitialBalance float64,
 	hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey, lighterWalletAddr, lighterPrivateKey, lighterApiKeyPrivateKey string, lighterApiKeyIndex int) error {
 
 	logger.Debugf("🔧 ExchangeStore.Update: userID=%s, id=%s, enabled=%v", userID, id, enabled)
@@ -280,6 +283,7 @@ func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKe
 		"paper_fee_rate":          paperFeeRate,
 		"paper_slippage_bps":      paperSlippageBps,
 		"paper_price_source":      paperPriceSource,
+		"paper_initial_balance":   paperInitialBalance,
 		"hyperliquid_wallet_addr": hyperliquidWalletAddr,
 		"aster_user":              asterUser,
 		"aster_signer":            asterSigner,
@@ -316,6 +320,16 @@ func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKe
 		return fmt.Errorf("exchange not found: id=%s, userID=%s", id, userID)
 	}
 	return nil
+}
+
+// UpdatePaperInitialBalance updates only the paper initial balance (used to persist paper equity across restarts)
+func (s *ExchangeStore) UpdatePaperInitialBalance(userID, id string, balance float64) error {
+	return s.db.Model(&Exchange{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Updates(map[string]interface{}{
+			"paper_initial_balance": balance,
+			"updated_at":            time.Now().UTC(),
+		}).Error
 }
 
 // UpdateAccountName updates the account name for an exchange
@@ -355,7 +369,7 @@ func (s *ExchangeStore) CreateLegacy(userID, id, name, typ string, enabled bool,
 
 	// Check if this is an old-style ID (exchange type as ID)
 	if id == "binance" || id == "bybit" || id == "okx" || id == "bitget" || id == "hyperliquid" || id == "aster" || id == "lighter" {
-		_, err := s.Create(userID, id, "Default", enabled, 0.0004, 2, "binance", apiKey, secretKey, "", testnet,
+		_, err := s.Create(userID, id, "Default", enabled, 0.0004, 2, "binance", 10000, apiKey, secretKey, "", testnet,
 			hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey, "", "", "", 0)
 		return err
 	}

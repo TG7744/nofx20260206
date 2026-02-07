@@ -68,7 +68,8 @@ interface ExchangeConfigModalProps {
     lighterApiKeyIndex?: number,
     paperFeeRate?: number,
     paperSlippageBps?: number,
-    paperPriceSource?: string
+    paperPriceSource?: string,
+    paperInitialBalance?: number
   ) => Promise<void>
   onDelete: (exchangeId: string) => void
   onClose: () => void
@@ -226,6 +227,7 @@ export function ExchangeConfigModal({
   const [paperFeeRate, setPaperFeeRate] = useState(0.0004)
   const [paperSlippageBps, setPaperSlippageBps] = useState(2)
   const [paperPriceSource, setPaperPriceSource] = useState('binance')
+  const [paperInitialBalance, setPaperInitialBalance] = useState(10000)
 
   // Other state
   const [secureInputTarget, setSecureInputTarget] = useState<
@@ -310,6 +312,11 @@ export function ExchangeConfigModal({
       )
       setPaperPriceSource(
         selectedExchange.paper_price_source || 'binance'
+      )
+      setPaperInitialBalance(
+        selectedExchange.paper_initial_balance !== undefined
+          ? selectedExchange.paper_initial_balance
+          : 10000
       )
     }
   }, [editingExchangeId, selectedExchange])
@@ -433,7 +440,8 @@ export function ExchangeConfigModal({
           undefined,
           paperFeeRate ?? 0.0004,
           paperSlippageBps ?? 2,
-          paperPriceSource
+          paperPriceSource,
+          paperInitialBalance
         )
       } else if (
         currentExchangeType === 'binance' ||
@@ -830,6 +838,29 @@ export function ExchangeConfigModal({
           {/* Paper config */}
           {currentExchangeType === 'paper' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label
+                  className="flex items-center gap-2 text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {language === 'zh' ? '初始账户资金 (USDT)' : 'Initial Balance (USDT)'}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={paperInitialBalance}
+                  onChange={(e) =>
+                    setPaperInitialBalance(parseFloat(e.target.value))
+                  }
+                  className="w-full px-4 py-3 rounded-xl text-base"
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                />
+              </div>
               <div className="space-y-2">
                 <label
                   className="flex items-center gap-2 text-sm font-semibold"

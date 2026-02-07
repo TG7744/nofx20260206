@@ -592,8 +592,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
 
   const handleSaveDrawdown = async () => {
     if (!ddTraderId) return
+    const sanitizedMin =
+      Number.isFinite(ddMinProfit) && ddMinProfit >= 0 ? ddMinProfit : 5
+    const sanitizedRetrace =
+      Number.isFinite(ddRetrace) && ddRetrace > 0 ? ddRetrace : 40
+
     if (ddEnabled) {
-      if (ddMinProfit < 0 || ddRetrace <= 0) {
+      if (sanitizedMin < 0 || sanitizedRetrace <= 0) {
         toast.error(language === 'zh' ? '参数无效' : 'Invalid parameters')
         return
       }
@@ -602,8 +607,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       await toast.promise(
         api.updateDrawdown(ddTraderId, {
           enable_drawdown_guard: ddEnabled,
-          drawdown_min_profit_pct: ddMinProfit,
-          drawdown_retrace_pct: ddRetrace,
+          drawdown_min_profit_pct: sanitizedMin,
+          drawdown_retrace_pct: sanitizedRetrace,
         }),
         {
           loading: language === 'zh' ? '正在保存…' : 'Saving…',
@@ -887,7 +892,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     lighterApiKeyIndex?: number,
     paperFeeRate?: number,
     paperSlippageBps?: number,
-    paperPriceSource?: string
+    paperPriceSource?: string,
+    paperInitialBalance?: number
   ) => {
     try {
       if (exchangeId) {
@@ -918,6 +924,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                 paperPriceSource ??
                 existingExchange.paper_price_source ??
                 'binance',
+              paper_initial_balance:
+                paperInitialBalance ??
+                existingExchange.paper_initial_balance ??
+                10000,
               hyperliquid_wallet_addr: hyperliquidWalletAddr || '',
               aster_user: asterUser || '',
               aster_signer: asterSigner || '',
@@ -951,6 +961,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           paper_fee_rate: paperFeeRate ?? 0.0004,
           paper_slippage_bps: paperSlippageBps ?? 2,
           paper_price_source: paperPriceSource ?? 'binance',
+          paper_initial_balance: paperInitialBalance ?? 10000,
           api_key: apiKey || '',
           secret_key: secretKey || '',
           passphrase: passphrase || '',
@@ -1308,8 +1319,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               </span>
               <input
                 type="number"
-                value={ddMinProfit}
-                onChange={(e) => setDdMinProfit(parseFloat(e.target.value))}
+                value={Number.isNaN(ddMinProfit) ? '' : ddMinProfit}
+                onChange={(e) => {
+                  const val = e.target.value
+                  setDdMinProfit(val === '' ? NaN : parseFloat(val))
+                }}
                 className="w-20 px-2 py-1 rounded bg-black/30 border border-zinc-800 text-sm text-zinc-100"
                 disabled={!ddEnabled}
               />
@@ -1320,8 +1334,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               </span>
               <input
                 type="number"
-                value={ddRetrace}
-                onChange={(e) => setDdRetrace(parseFloat(e.target.value))}
+                value={Number.isNaN(ddRetrace) ? '' : ddRetrace}
+                onChange={(e) => {
+                  const val = e.target.value
+                  setDdRetrace(val === '' ? NaN : parseFloat(val))
+                }}
                 className="w-20 px-2 py-1 rounded bg-black/30 border border-zinc-800 text-sm text-zinc-100"
                 disabled={!ddEnabled}
               />

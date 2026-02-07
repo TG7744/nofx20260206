@@ -38,6 +38,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// defaultPaperFee returns a reasonable taker fee rate based on price source
+func defaultPaperFee(priceSource string) float64 {
+	switch strings.ToLower(priceSource) {
+	case "binance", "paper":
+		return 0.0004
+	case "okx", "kucoin":
+		return 0.0005
+	case "bybit", "bitget", "gate":
+		return 0.0006
+	default:
+		return 0.0005
+	}
+}
+
 // Server HTTP API server
 type Server struct {
 	router          *gin.Engine
@@ -475,6 +489,7 @@ type SafeExchangeConfig struct {
 	PaperFeeRate          float64 `json:"paper_fee_rate,omitempty"`
 	PaperSlippageBps      float64 `json:"paper_slippage_bps,omitempty"`
 	PaperPriceSource      string  `json:"paper_price_source,omitempty"`
+	PaperInitialBalance   float64 `json:"paper_initial_balance,omitempty"`
 	HyperliquidWalletAddr string  `json:"hyperliquidWalletAddr"` // Hyperliquid wallet address (not sensitive)
 	AsterUser             string  `json:"asterUser"`             // Aster username (not sensitive)
 	AsterSigner           string  `json:"asterSigner"`           // Aster signer (not sensitive)
@@ -500,6 +515,7 @@ type UpdateExchangeConfigRequest struct {
 		PaperFeeRate            float64 `json:"paper_fee_rate"`
 		PaperSlippageBps        float64 `json:"paper_slippage_bps"`
 		PaperPriceSource        string  `json:"paper_price_source"`
+		PaperInitialBalance     float64 `json:"paper_initial_balance"`
 		HyperliquidWalletAddr   string  `json:"hyperliquid_wallet_addr"`
 		AsterUser               string  `json:"aster_user"`
 		AsterSigner             string  `json:"aster_signer"`
@@ -619,6 +635,13 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 	} else if !exchangeCfg.Enabled {
 		logger.Infof("⚠️ Exchange %s not enabled, using user input for initial balance", req.ExchangeID)
 	} else {
+		if exchangeCfg.ExchangeType == "paper" && actualBalance <= 0 {
+			if exchangeCfg.PaperInitialBalance > 0 {
+				actualBalance = exchangeCfg.PaperInitialBalance
+			} else {
+				actualBalance = 10000
+			}
+		}
 		// Create temporary trader based on exchange type to query balance
 		var tempTrader trader.Trader
 		var createErr error
@@ -1282,7 +1305,7 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 	s.cancelScheduleTimer(traderID)
 
 	// Verify trader belongs to current user
-	_, err := s.store.Trader().GetFullConfig(userID, traderID)
+	fullCfg, err := s.store.Trader().GetFullConfig(userID, traderID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
 		return
@@ -1301,6 +1324,14 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 		return
 	}
 
+	// Capture current positions before stopping (needed for paper persistence)
+	var currentPositions []map[string]interface{}
+	if fullCfg.Exchange != nil && fullCfg.Exchange.ExchangeType == "paper" {
+		if positions, pErr := trader.GetPositions(); pErr == nil {
+			currentPositions = positions
+		}
+	}
+
 	// Stop trader
 	trader.Stop()
 
@@ -1308,6 +1339,55 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 	err = s.store.Trader().UpdateStatus(userID, traderID, false)
 	if err != nil {
 		logger.Infof("⚠️  Failed to update trader status: %v", err)
+	}
+
+	// Persist paper trader equity & open positions to survive restart
+	if fullCfg.Exchange != nil && fullCfg.Exchange.ExchangeType == "paper" {
+		if account, accErr := trader.GetAccountInfo(); accErr == nil {
+			if bal, ok := account["total_equity"].(float64); ok && bal > 0 {
+				if err := s.store.Trader().UpdateInitialBalance(userID, traderID, bal); err != nil {
+					logger.Infof("⚠️  Failed to persist paper balance: %v", err)
+				}
+				_ = s.store.Exchange().UpdatePaperInitialBalance(userID, fullCfg.Exchange.ID, bal)
+			}
+		}
+
+		// Persist open positions as OPEN records
+		if len(currentPositions) > 0 {
+			_ = s.store.Position().DeleteAllOpenPositions(traderID)
+			nowMs := time.Now().UTC().UnixMilli()
+			for _, pos := range currentPositions {
+				symbol, _ := pos["symbol"].(string)
+				side, _ := pos["side"].(string)
+				entryPrice, _ := pos["entry_price"].(float64)
+				qty, _ := pos["quantity"].(float64)
+				lev := 1
+				if lv, ok := pos["leverage"].(float64); ok && lv > 0 {
+					lev = int(lv)
+				}
+				record := &store.TraderPosition{
+					TraderID:      traderID,
+					ExchangeID:    fullCfg.Exchange.ID,
+					ExchangeType:  fullCfg.Exchange.ExchangeType,
+					Symbol:        symbol,
+					Side:          strings.ToUpper(side),
+					EntryPrice:    entryPrice,
+					Quantity:      qty,
+					EntryQuantity: qty,
+					Leverage:      lev,
+					EntryTime:     nowMs,
+					Status:        "OPEN",
+					CreatedAt:     nowMs,
+					UpdatedAt:     nowMs,
+					Source:        "paper",
+				}
+				if err := s.store.Position().Create(record); err != nil {
+					logger.Infof("⚠️  Failed to persist paper open position %s: %v", symbol, err)
+				}
+			}
+		} else {
+			_ = s.store.Position().DeleteAllOpenPositions(traderID)
+		}
 	}
 
 	logger.Infof("⏹  Trader %s stopped", trader.GetName())
@@ -1480,6 +1560,13 @@ func (s *Server) handleSyncBalance(c *gin.Context) {
 			)
 		} else {
 			createErr = fmt.Errorf("Lighter requires wallet address and API Key private key")
+		}
+	case "paper":
+		// Use in-memory paper trader (positions are not persisted remotely)
+		if at, err := s.traderManager.GetTrader(traderID); err == nil {
+			tempTrader = at.GetUnderlyingTrader()
+		} else {
+			createErr = fmt.Errorf("paper trader not found in memory: %w", err)
 		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
@@ -1698,6 +1785,47 @@ func (s *Server) handleClosePosition(c *gin.Context) {
 	}
 
 	logger.Infof("✅ Position closed successfully: symbol=%s, side=%s, qty=%.6f, result=%v", req.Symbol, req.Side, posQty, result)
+
+	// For paper trading, persist closed position to history for frontend display
+	if exchangeCfg.ExchangeType == "paper" && s.store != nil {
+		entryTime := time.Now().UTC()
+		exitTime := entryTime
+		exitPrice := entryPrice
+		if p, ok := result["price"].(float64); ok {
+			exitPrice = p
+		}
+		realizedPnL := 0.0
+		if pnl, ok := result["realizedPnl"].(float64); ok {
+			realizedPnL = pnl
+		}
+		leverage := 1
+		// Try to reuse leverage from existing position snapshot
+		for _, pos := range positions {
+			if pos["symbol"] == req.Symbol && pos["side"] == strings.ToLower(req.Side) {
+				if lev, ok := pos["leverage"].(float64); ok && lev > 0 {
+					leverage = int(lev)
+				}
+				break
+			}
+		}
+
+		record := store.ClosedPnLRecord{
+			Symbol:      req.Symbol,
+			Side:        strings.ToLower(req.Side),
+			EntryPrice:  entryPrice,
+			ExitPrice:   exitPrice,
+			Quantity:    posQty,
+			RealizedPnL: realizedPnL,
+			Fee:         0,
+			Leverage:    leverage,
+			EntryTime:   entryTime.UnixMilli(),
+			ExitTime:    exitTime.UnixMilli(),
+			CloseType:   "manual",
+		}
+		if _, _, err := s.store.Position().SyncClosedPositions(traderID, exchangeCfg.ID, exchangeCfg.ExchangeType, []store.ClosedPnLRecord{record}); err != nil {
+			logger.Infof("⚠️ Failed to record paper closed position: %v", err)
+		}
+	}
 
 	// Record order to database (for chart markers and history)
 	s.recordClosePositionOrder(traderID, exchangeCfg.ID, exchangeCfg.ExchangeType, req.Symbol, req.Side, posQty, entryPrice, result)
@@ -2101,6 +2229,7 @@ func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
 			PaperFeeRate:          exchange.PaperFeeRate,
 			PaperSlippageBps:      exchange.PaperSlippageBps,
 			PaperPriceSource:      exchange.PaperPriceSource,
+			PaperInitialBalance:   exchange.PaperInitialBalance,
 			HyperliquidWalletAddr: exchange.HyperliquidWalletAddr,
 			AsterUser:             exchange.AsterUser,
 			AsterSigner:           exchange.AsterSigner,
@@ -2174,6 +2303,16 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 	// Update each exchange's configuration and track traders that need reload
 	tradersToReload := make(map[string]bool)
 	for exchangeID, exchangeData := range req.Exchanges {
+		if strings.ToLower(exchangeData.PaperPriceSource) == "" {
+			exchangeData.PaperPriceSource = "binance"
+		}
+		if exchangeData.PaperFeeRate <= 0 {
+			exchangeData.PaperFeeRate = defaultPaperFee(exchangeData.PaperPriceSource)
+		}
+		if exchangeData.PaperInitialBalance <= 0 {
+			exchangeData.PaperInitialBalance = 10000
+		}
+
 		// Find traders using this exchange BEFORE updating
 		traders, _ := s.store.Trader().ListByExchangeID(userID, exchangeID)
 		for _, t := range traders {
@@ -2191,6 +2330,7 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 			exchangeData.PaperFeeRate,
 			exchangeData.PaperSlippageBps,
 			exchangeData.PaperPriceSource,
+			exchangeData.PaperInitialBalance,
 			exchangeData.HyperliquidWalletAddr,
 			exchangeData.AsterUser,
 			exchangeData.AsterSigner,
@@ -2234,6 +2374,7 @@ type CreateExchangeRequest struct {
 	PaperFeeRate            float64 `json:"paper_fee_rate"`
 	PaperSlippageBps        float64 `json:"paper_slippage_bps"`
 	PaperPriceSource        string  `json:"paper_price_source"`
+	PaperInitialBalance     float64 `json:"paper_initial_balance"`
 	HyperliquidWalletAddr   string  `json:"hyperliquid_wallet_addr"`
 	AsterUser               string  `json:"aster_user"`
 	AsterSigner             string  `json:"aster_signer"`
@@ -2306,10 +2447,24 @@ func (s *Server) handleCreateExchange(c *gin.Context) {
 		return
 	}
 
+	// Defaults for paper exchange settings
+	if strings.ToLower(req.ExchangeType) == "paper" {
+		if strings.TrimSpace(req.PaperPriceSource) == "" {
+			req.PaperPriceSource = "binance"
+		}
+		if req.PaperFeeRate <= 0 {
+			req.PaperFeeRate = defaultPaperFee(req.PaperPriceSource)
+		}
+		if req.PaperInitialBalance <= 0 {
+			req.PaperInitialBalance = 10000
+		}
+	}
+
 	// Create new exchange account
 	id, err := s.store.Exchange().Create(
 		userID, req.ExchangeType, req.AccountName, req.Enabled,
 		req.PaperFeeRate, req.PaperSlippageBps, req.PaperPriceSource,
+		req.PaperInitialBalance,
 		req.APIKey, req.SecretKey, req.Passphrase, req.Testnet,
 		req.HyperliquidWalletAddr, req.AsterUser, req.AsterSigner, req.AsterPrivateKey,
 		req.LighterWalletAddr, req.LighterPrivateKey, req.LighterAPIKeyPrivateKey, req.LighterAPIKeyIndex,

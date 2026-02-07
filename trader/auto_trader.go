@@ -311,6 +311,23 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		if config.PaperPriceSource != "" {
 			pTrader.SetPriceSource(config.PaperPriceSource)
 		}
+		// Restore open positions from store (paper persistence)
+		if st != nil {
+			if openPositions, err := st.Position().GetOpenPositions(config.ID); err == nil {
+				for _, pos := range openPositions {
+					side := strings.ToLower(pos.Side)
+					if side == "buy" {
+						side = "long"
+					} else if side == "sell" {
+						side = "short"
+					}
+					pTrader.RestorePosition(pos.Symbol, side, pos.Quantity, pos.EntryPrice, pos.Leverage)
+				}
+				if len(openPositions) > 0 {
+					logger.Infof("✓ [%s] Restored %d paper positions from database", config.Name, len(openPositions))
+				}
+			}
+		}
 		// Prime with any symbol price later before order
 		trader = pTrader
 	default:

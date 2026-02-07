@@ -131,6 +131,7 @@ export interface Exchange {
   paper_fee_rate?: number
   paper_slippage_bps?: number
   paper_price_source?: string
+  paper_initial_balance?: number
   apiKey?: string
   secretKey?: string
   passphrase?: string // OKX specific
@@ -155,6 +156,7 @@ export interface CreateExchangeRequest {
   paper_fee_rate?: number
   paper_slippage_bps?: number
   paper_price_source?: string
+  paper_initial_balance?: number
   api_key?: string
   secret_key?: string
   passphrase?: string
@@ -214,6 +216,7 @@ export interface UpdateExchangeConfigRequest {
       paper_fee_rate?: number
       paper_slippage_bps?: number
       paper_price_source?: string
+      paper_initial_balance?: number
       // Hyperliquid 特定字段
       hyperliquid_wallet_addr?: string
       // Aster 特定字段

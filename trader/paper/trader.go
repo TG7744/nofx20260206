@@ -200,6 +200,7 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	unrealized := 0.0
+	totalMargin := 0.0
 	for sym, p := range t.positions {
 		if p.quantity == 0 {
 			continue
@@ -210,21 +211,51 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 			u = -u
 		}
 		unrealized += u * p.quantity
+		totalMargin += p.margin
 	}
-	equity := t.balance + unrealized
+	equity := t.balance + totalMargin + unrealized
 	return map[string]interface{}{
 		"total_equity":          equity,
 		"totalWalletBalance":    equity,
-		"wallet_balance":        equity,
-		"balance":               equity,
-		"availableBalance":      equity,
-		"available_balance":     equity,
+		"wallet_balance":        t.balance + totalMargin,
+		"balance":               t.balance,
+		"availableBalance":      t.balance,
+		"available_balance":     t.balance,
 		"totalUnrealizedProfit": unrealized,
 		"total_unrealized":      unrealized,
 		"totalEquity":           equity,
 		"total_pnl":             0.0,
 		"total_pnl_pct":         0.0,
 	}, nil
+}
+
+// RestorePosition rebuilds an open position (used to reload paper trader state)
+func (t *Trader) RestorePosition(symbol, side string, quantity, entryPrice float64, leverage int) {
+	if quantity <= 0 || entryPrice <= 0 {
+		return
+	}
+	if leverage < 1 {
+		leverage = 1
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	price := entryPrice
+	marginRequired := (price * quantity) / float64(leverage)
+	if t.balance < marginRequired {
+		// If not enough balance (should not happen), cap by balance
+		marginRequired = t.balance
+	}
+	t.balance -= marginRequired
+
+	p := &position{
+		side:       side,
+		quantity:   quantity,
+		entryPrice: price,
+		margin:     marginRequired,
+		leverage:   leverage,
+	}
+	t.positions[symbol] = p
 }
 
 func (t *Trader) GetPositions() ([]map[string]interface{}, error) {

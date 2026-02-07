@@ -676,6 +676,15 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		DrawdownRetracePct:    traderCfg.DrawdownRetracePct,
 	}
 
+	// Paper: if initial balance not recorded (e.g., after restart), fall back to exchange-level initial balance
+	if traderConfig.Exchange == "paper" && traderConfig.InitialBalance <= 0 {
+		if exchangeCfg.PaperInitialBalance > 0 {
+			traderConfig.InitialBalance = exchangeCfg.PaperInitialBalance
+		} else {
+			traderConfig.InitialBalance = 10000
+		}
+	}
+
 	logger.Infof("📊 Loading trader %s: ScanIntervalMinutes=%d (from DB), ScanInterval=%v",
 		traderCfg.Name, traderCfg.ScanIntervalMinutes, traderConfig.ScanInterval)
 
