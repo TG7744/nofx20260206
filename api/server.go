@@ -2342,6 +2342,15 @@ func (s *Server) handleTraderList(c *gin.Context) {
 		return
 	}
 
+	// Exchange lookup for type/name tagging
+	exchanges, _ := s.store.Exchange().List(userID)
+	exType := make(map[string]string, len(exchanges))
+	exName := make(map[string]string, len(exchanges))
+	for _, ex := range exchanges {
+		exType[ex.ID] = ex.ExchangeType
+		exName[ex.ID] = ex.Name
+	}
+
 	result := make([]map[string]interface{}, 0, len(traders))
 	for _, trader := range traders {
 		// Get real-time running status
@@ -2368,6 +2377,8 @@ func (s *Server) handleTraderList(c *gin.Context) {
 			"trader_name":         trader.Name,
 			"ai_model":            trader.AIModelID, // Use complete ID
 			"exchange_id":         trader.ExchangeID,
+			"exchange_type":       exType[trader.ExchangeID],
+			"exchange_name":       exName[trader.ExchangeID],
 			"is_running":          isRunning,
 			"show_in_competition": trader.ShowInCompetition,
 			"initial_balance":     trader.InitialBalance,
