@@ -29,6 +29,7 @@ import (
 	"nofx/trader/kucoin"
 	"nofx/trader/lighter"
 	"nofx/trader/okx"
+	"nofx/trader/paper"
 	"strconv"
 	"strings"
 	"sync"
@@ -1562,11 +1563,37 @@ func (s *Server) handleSyncBalance(c *gin.Context) {
 			createErr = fmt.Errorf("Lighter requires wallet address and API Key private key")
 		}
 	case "paper":
-		// Use in-memory paper trader (positions are not persisted remotely)
+		// Prefer in-memory trader; if missing, reload or reconstruct
 		if at, err := s.traderManager.GetTrader(traderID); err == nil {
 			tempTrader = at.GetUnderlyingTrader()
 		} else {
-			createErr = fmt.Errorf("paper trader not found in memory: %w", err)
+			_ = s.traderManager.LoadUserTradersFromStore(s.store, userID)
+			if at, err2 := s.traderManager.GetTrader(traderID); err2 == nil {
+				tempTrader = at.GetUnderlyingTrader()
+			} else {
+				p := paper.NewPaperTrader(fullConfig.Trader.InitialBalance)
+				if exchangeCfg.PaperFeeRate > 0 {
+					p.SetFeeRate(exchangeCfg.PaperFeeRate)
+				}
+				if exchangeCfg.PaperSlippageBps >= 0 {
+					p.SetSlippageBps(exchangeCfg.PaperSlippageBps)
+				}
+				if exchangeCfg.PaperPriceSource != "" {
+					p.SetPriceSource(exchangeCfg.PaperPriceSource)
+				}
+				if positions, errPos := s.store.Position().GetOpenPositions(traderID); errPos == nil {
+					for _, pos := range positions {
+						side := strings.ToLower(pos.Side)
+						if side == "buy" {
+							side = "long"
+						} else if side == "sell" {
+							side = "short"
+						}
+						p.RestorePosition(pos.Symbol, side, pos.Quantity, pos.EntryPrice, pos.Leverage)
+					}
+				}
+				tempTrader = p
+			}
 		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
@@ -1730,6 +1757,41 @@ func (s *Server) handleClosePosition(c *gin.Context) {
 			)
 		} else {
 			createErr = fmt.Errorf("Lighter requires wallet address and API Key private key")
+		}
+	case "paper":
+		// Prefer in-memory trader; fallback to reconstruction from DB
+		if at, err := s.traderManager.GetTrader(traderID); err == nil {
+			tempTrader = at.GetUnderlyingTrader()
+		} else {
+			// try reload
+			_ = s.traderManager.LoadUserTradersFromStore(s.store, userID)
+			if at, err2 := s.traderManager.GetTrader(traderID); err2 == nil {
+				tempTrader = at.GetUnderlyingTrader()
+			} else {
+				// reconstruct paper trader with persisted open positions
+				p := paper.NewPaperTrader(fullConfig.Trader.InitialBalance)
+				if exchangeCfg.PaperFeeRate > 0 {
+					p.SetFeeRate(exchangeCfg.PaperFeeRate)
+				}
+				if exchangeCfg.PaperSlippageBps >= 0 {
+					p.SetSlippageBps(exchangeCfg.PaperSlippageBps)
+				}
+				if exchangeCfg.PaperPriceSource != "" {
+					p.SetPriceSource(exchangeCfg.PaperPriceSource)
+				}
+				if positions, errPos := s.store.Position().GetOpenPositions(traderID); errPos == nil {
+					for _, pos := range positions {
+						side := strings.ToLower(pos.Side)
+						if side == "buy" {
+							side = "long"
+						} else if side == "sell" {
+							side = "short"
+						}
+						p.RestorePosition(pos.Symbol, side, pos.Quantity, pos.EntryPrice, pos.Leverage)
+					}
+				}
+				tempTrader = p
+			}
 		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
@@ -2194,11 +2256,6 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
 	userID := c.GetString("user_id")
 	logger.Infof("🔍 Querying exchange configs for user %s", userID)
-
-	// Ensure default paper exchange exists
-	if _, err := s.store.Exchange().EnsurePaperExchange(userID); err != nil {
-		logger.Infof("⚠️ Failed to ensure paper exchange for user %s: %v", userID, err)
-	}
 
 	exchanges, err := s.store.Exchange().List(userID)
 	if err != nil {

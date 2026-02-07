@@ -1815,10 +1815,6 @@ func validateJSONFormat(jsonStr string) error {
 		return fmt.Errorf("JSON must start with [{ (whitespace allowed), actual: %s", trimmed[:min(20, len(trimmed))])
 	}
 
-	if strings.Contains(jsonStr, "~") {
-		return fmt.Errorf("JSON cannot contain range symbol ~, all numbers must be precise single values")
-	}
-
 	for i := 0; i < len(jsonStr)-4; i++ {
 		if jsonStr[i] >= '0' && jsonStr[i] <= '9' &&
 			jsonStr[i+1] == ',' &&
@@ -1827,6 +1823,19 @@ func validateJSONFormat(jsonStr string) error {
 			jsonStr[i+4] >= '0' && jsonStr[i+4] <= '9' {
 			return fmt.Errorf("JSON numbers cannot contain thousand separator comma, found: %s", jsonStr[i:min(i+10, len(jsonStr))])
 		}
+	}
+
+	// Parse JSON to ensure numbers/strings are spec compliant and surface friendly error for approximation symbols
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		if strings.Contains(jsonStr, "~") || strings.Contains(jsonStr, "≈") || strings.Contains(jsonStr, "≃") || strings.Contains(jsonStr, "∼") {
+			return fmt.Errorf("JSON规范不允许近似符号(~,≈,∼)，请直接给出精确数字")
+		}
+		return err
+	}
+
+	if containsApproxSymbol(parsed) {
+		return fmt.Errorf("JSON字段中发现近似符号(~,≈,∼)，请改为精确数字")
 	}
 
 	return nil
@@ -1841,6 +1850,27 @@ func min(a, b int) int {
 
 func removeInvisibleRunes(s string) string {
 	return reInvisibleRunes.ReplaceAllString(s, "")
+}
+
+// containsApproxSymbol walks parsed JSON and checks for approximation symbols in strings.
+func containsApproxSymbol(v interface{}) bool {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for _, vv := range val {
+			if containsApproxSymbol(vv) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, vv := range val {
+			if containsApproxSymbol(vv) {
+				return true
+			}
+		}
+	case string:
+		return strings.Contains(val, "~") || strings.Contains(val, "≈") || strings.Contains(val, "≃") || strings.Contains(val, "∼")
+	}
+	return false
 }
 
 func compactArrayOpen(s string) string {

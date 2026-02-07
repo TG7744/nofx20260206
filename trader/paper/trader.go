@@ -206,6 +206,9 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 			continue
 		}
 		cur := t.getPrice(sym)
+		if cur <= 0 {
+			cur = p.entryPrice
+		}
 		u := (cur - p.entryPrice)
 		if p.side == "short" {
 			u = -u
@@ -276,6 +279,9 @@ func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 			continue
 		}
 		cur := t.getPrice(sym)
+		if cur <= 0 {
+			cur = p.entryPrice
+		}
 		unrealized := (cur - p.entryPrice)
 		if p.side == "short" {
 			unrealized = -unrealized
@@ -387,6 +393,8 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	p.quantity = newQty
 	p.margin += marginRequired
 	p.leverage = leverage
+	// Cache latest trade price so unrealized PnL falls back to entry if ticker fetch fails
+	t.lastPrice[symbol] = price
 	return map[string]interface{}{"price": price, "executedQty": quantity, "status": "FILLED"}, nil
 }
 
