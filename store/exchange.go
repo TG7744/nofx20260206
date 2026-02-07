@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"nofx/crypto"
 	"nofx/logger"
@@ -17,27 +18,27 @@ type ExchangeStore struct {
 
 // Exchange exchange configuration
 type Exchange struct {
-	ID                      string          `gorm:"primaryKey" json:"id"`
-	ExchangeType            string          `gorm:"column:exchange_type;not null;default:''" json:"exchange_type"`
-	AccountName             string          `gorm:"column:account_name;not null;default:''" json:"account_name"`
-	UserID                  string          `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
-	Name                    string          `gorm:"not null" json:"name"`
-	Type                    string          `gorm:"not null" json:"type"` // "cex" or "dex"
-	Enabled                 bool            `gorm:"default:false" json:"enabled"`
+	ID                      string                 `gorm:"primaryKey" json:"id"`
+	ExchangeType            string                 `gorm:"column:exchange_type;not null;default:''" json:"exchange_type"`
+	AccountName             string                 `gorm:"column:account_name;not null;default:''" json:"account_name"`
+	UserID                  string                 `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
+	Name                    string                 `gorm:"not null" json:"name"`
+	Type                    string                 `gorm:"not null" json:"type"` // "cex" or "dex"
+	Enabled                 bool                   `gorm:"default:false" json:"enabled"`
 	APIKey                  crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
 	SecretKey               crypto.EncryptedString `gorm:"column:secret_key;default:''" json:"secretKey"`
 	Passphrase              crypto.EncryptedString `gorm:"column:passphrase;default:''" json:"passphrase"`
-	Testnet                 bool            `gorm:"default:false" json:"testnet"`
-	HyperliquidWalletAddr   string          `gorm:"column:hyperliquid_wallet_addr;default:''" json:"hyperliquidWalletAddr"`
-	AsterUser               string          `gorm:"column:aster_user;default:''" json:"asterUser"`
-	AsterSigner             string          `gorm:"column:aster_signer;default:''" json:"asterSigner"`
+	Testnet                 bool                   `gorm:"default:false" json:"testnet"`
+	HyperliquidWalletAddr   string                 `gorm:"column:hyperliquid_wallet_addr;default:''" json:"hyperliquidWalletAddr"`
+	AsterUser               string                 `gorm:"column:aster_user;default:''" json:"asterUser"`
+	AsterSigner             string                 `gorm:"column:aster_signer;default:''" json:"asterSigner"`
 	AsterPrivateKey         crypto.EncryptedString `gorm:"column:aster_private_key;default:''" json:"asterPrivateKey"`
-	LighterWalletAddr       string          `gorm:"column:lighter_wallet_addr;default:''" json:"lighterWalletAddr"`
+	LighterWalletAddr       string                 `gorm:"column:lighter_wallet_addr;default:''" json:"lighterWalletAddr"`
 	LighterPrivateKey       crypto.EncryptedString `gorm:"column:lighter_private_key;default:''" json:"lighterPrivateKey"`
 	LighterAPIKeyPrivateKey crypto.EncryptedString `gorm:"column:lighter_api_key_private_key;default:''" json:"lighterAPIKeyPrivateKey"`
-	LighterAPIKeyIndex      int             `gorm:"column:lighter_api_key_index;default:0" json:"lighterAPIKeyIndex"`
-	CreatedAt               time.Time       `json:"created_at"`
-	UpdatedAt               time.Time       `json:"updated_at"`
+	LighterAPIKeyIndex      int                    `gorm:"column:lighter_api_key_index;default:0" json:"lighterAPIKeyIndex"`
+	CreatedAt               time.Time              `json:"created_at"`
+	UpdatedAt               time.Time              `json:"updated_at"`
 }
 
 func (Exchange) TableName() string { return "exchanges" }
@@ -132,8 +133,40 @@ func (s *ExchangeStore) migrateToMultiAccount() error {
 }
 
 func (s *ExchangeStore) initDefaultData() error {
-	// No longer pre-populate exchanges - create on demand when user configures
+	// No global defaults; per-user defaults are inserted lazily (e.g., paper exchange)
 	return nil
+}
+
+// EnsurePaperExchange ensures a paper exchange exists for the user and returns it
+func (s *ExchangeStore) EnsurePaperExchange(userID string) (*Exchange, error) {
+	var existing Exchange
+	err := s.db.Where("user_id = ? AND exchange_type = ?", userID, "paper").First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	// Create default paper exchange
+	id := uuid.New().String()
+	paper := &Exchange{
+		ID:           id,
+		ExchangeType: "paper",
+		AccountName:  "Paper",
+		UserID:       userID,
+		Name:         "Paper Trading",
+		Type:         "paper",
+		Enabled:      true,
+		Testnet:      false,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	if err := s.db.Create(paper).Error; err != nil {
+		return nil, err
+	}
+	logger.Infof("✅ Created default paper exchange for user %s (id=%s)", userID, id)
+	return paper, nil
 }
 
 // List gets user's exchange list
@@ -159,6 +192,8 @@ func (s *ExchangeStore) GetByID(userID, id string) (*Exchange, error) {
 // getExchangeNameAndType returns the display name and type for an exchange type
 func getExchangeNameAndType(exchangeType string) (name string, typ string) {
 	switch exchangeType {
+	case "paper":
+		return "Paper Trading", "paper"
 	case "binance":
 		return "Binance Futures", "cex"
 	case "bybit":

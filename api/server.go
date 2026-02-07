@@ -2057,6 +2057,12 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
 	userID := c.GetString("user_id")
 	logger.Infof("🔍 Querying exchange configs for user %s", userID)
+
+	// Ensure default paper exchange exists
+	if _, err := s.store.Exchange().EnsurePaperExchange(userID); err != nil {
+		logger.Infof("⚠️ Failed to ensure paper exchange for user %s: %v", userID, err)
+	}
+
 	exchanges, err := s.store.Exchange().List(userID)
 	if err != nil {
 		SafeInternalError(c, "Failed to get exchange configs", err)
@@ -2258,6 +2264,7 @@ func (s *Server) handleCreateExchange(c *gin.Context) {
 
 	// Validate exchange type
 	validTypes := map[string]bool{
+		"paper":   true,
 		"binance": true, "bybit": true, "okx": true, "bitget": true,
 		"hyperliquid": true, "aster": true, "lighter": true, "gate": true, "kucoin": true,
 	}
@@ -3647,6 +3654,7 @@ func (s *Server) handleGetSupportedExchanges(c *gin.Context) {
 	// Return static list of supported exchange types
 	// Note: ID is empty for supported exchanges (they are templates, not actual accounts)
 	supportedExchanges := []SafeExchangeConfig{
+		{ExchangeType: "paper", Name: "Paper Trading", Type: "paper"},
 		{ExchangeType: "binance", Name: "Binance Futures", Type: "cex"},
 		{ExchangeType: "bybit", Name: "Bybit Futures", Type: "cex"},
 		{ExchangeType: "okx", Name: "OKX Futures", Type: "cex"},
