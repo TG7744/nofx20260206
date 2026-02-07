@@ -680,6 +680,9 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 			} else {
 				createErr = fmt.Errorf("Lighter requires wallet address and API Key private key")
 			}
+		case "paper":
+			// Paper exchange: use provided initial balance, no remote query
+			actualBalance = req.InitialBalance
 		default:
 			logger.Infof("⚠️ Unsupported exchange type: %s, using user input for initial balance", exchangeCfg.ExchangeType)
 		}
@@ -2516,12 +2519,18 @@ func (s *Server) handleAccount(c *gin.Context) {
 		return
 	}
 
+	// Defensive logging: tolerate missing fields
+	totalEquity, _ := account["total_equity"].(float64)
+	available, _ := account["available_balance"].(float64)
+	totalPnL, _ := account["total_pnl"].(float64)
+	totalPnLPct, _ := account["total_pnl_pct"].(float64)
+
 	logger.Infof("✓ Returning account info [%s]: equity=%.2f, available=%.2f, pnl=%.2f (%.2f%%)",
 		trader.GetName(),
-		account["total_equity"],
-		account["available_balance"],
-		account["total_pnl"],
-		account["total_pnl_pct"])
+		totalEquity,
+		available,
+		totalPnL,
+		totalPnLPct)
 	c.JSON(http.StatusOK, account)
 }
 

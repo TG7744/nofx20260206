@@ -15,6 +15,8 @@ type position struct {
 	side       string // long/short
 	quantity   float64
 	entryPrice float64
+	margin     float64 // total margin locked for this position
+	leverage   int
 }
 
 // Trader is a lightweight paper trader implementing types.Trader interface (subset needed by auto_trader)
@@ -211,12 +213,17 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 	}
 	equity := t.balance + unrealized
 	return map[string]interface{}{
-		"total_equity":       equity,
-		"totalWalletBalance": equity,
-		"wallet_balance":     equity,
-		"balance":            equity,
-		"availableBalance":   equity,
-		"available_balance":  equity,
+		"total_equity":          equity,
+		"totalWalletBalance":    equity,
+		"wallet_balance":        equity,
+		"balance":               equity,
+		"availableBalance":      equity,
+		"available_balance":     equity,
+		"totalUnrealizedProfit": unrealized,
+		"total_unrealized":      unrealized,
+		"totalEquity":           equity,
+		"total_pnl":             0.0,
+		"total_pnl_pct":         0.0,
 	}, nil
 }
 
@@ -243,27 +250,53 @@ func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 			unrealized = -unrealized
 		}
 		unrealized *= p.quantity
+
+		positionAmt := p.quantity
+		if p.side == "short" {
+			positionAmt = -positionAmt
+		}
+
+		leverage := p.leverage
+		if leverage < 1 {
+			leverage = 1
+		}
+
+		// Simple placeholder liquidation price (not enforced in paper mode)
+		liqPrice := 0.0
+		if leverage > 1 {
+			if p.side == "long" {
+				liqPrice = p.entryPrice * (1 - 1/float64(leverage))
+			} else {
+				liqPrice = p.entryPrice * (1 + 1/float64(leverage))
+			}
+		}
+
 		res = append(res, map[string]interface{}{
-			"symbol":     sym,
-			"side":       p.side,
-			"quantity":   p.quantity,
-			"entryPrice": p.entryPrice,
-			"markPrice":  cur,
-			"unrealized": unrealized,
+			"symbol":           sym,
+			"side":             p.side,
+			"quantity":         p.quantity,
+			"positionAmt":      positionAmt,
+			"entryPrice":       p.entryPrice,
+			"markPrice":        cur,
+			"unrealized":       unrealized,
+			"unRealizedProfit": unrealized,
+			"liquidationPrice": liqPrice,
+			"leverage":         float64(leverage),
+			"margin":           p.margin,
 		})
 	}
 	return res, nil
 }
 
 func (t *Trader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	return t.openPosition(symbol, "long", quantity)
+	return t.openPosition(symbol, "long", quantity, leverage)
 }
 
 func (t *Trader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	return t.openPosition(symbol, "short", quantity)
+	return t.openPosition(symbol, "short", quantity, leverage)
 }
 
-func (t *Trader) openPosition(symbol, side string, quantity float64) (map[string]interface{}, error) {
+func (t *Trader) openPosition(symbol, side string, quantity float64, leverage int) (map[string]interface{}, error) {
 	if quantity <= 0 {
 		return nil, fmt.Errorf("quantity must be > 0")
 	}
@@ -276,15 +309,29 @@ func (t *Trader) openPosition(symbol, side string, quantity float64) (map[string
 	} else {
 		price *= 1 - t.slippageBps/10000.0
 	}
-	cost := price * quantity
-	fee := t.fee(cost)
-	if t.balance < cost+fee {
-		return nil, fmt.Errorf("insufficient balance")
+	// leverage-aware margin (futures style)
+	if leverage < 1 {
+		leverage = 1
 	}
-	t.balance -= cost + fee
+	marginRequired := (price * quantity) / float64(leverage)
+	fee := t.fee(price * quantity)
+	if t.balance < marginRequired+fee {
+		// auto-scale position to max affordable size instead of failing
+		reqPerQty := (price / float64(leverage)) + price*t.feeRate
+		maxQty := t.balance / reqPerQty
+		if maxQty <= 0 {
+			logger.Infof("[paper] insufficient balance: bal=%.4f price=%.4f qty=%.6f lev=%d margin=%.4f fee=%.4f reqPerQty=%.6f source=%s", t.balance, price, quantity, leverage, marginRequired, fee, reqPerQty, t.priceSource)
+			return nil, fmt.Errorf("insufficient balance")
+		}
+		logger.Infof("[paper] auto-resize qty from %.6f to %.6f due to balance %.4f (price=%.4f lev=%d)", quantity, maxQty, t.balance, price, leverage)
+		quantity = maxQty
+		marginRequired = (price * quantity) / float64(leverage)
+		fee = t.fee(price * quantity)
+	}
+	t.balance -= marginRequired + fee
 	p, ok := t.positions[symbol]
 	if !ok {
-		p = &position{side: side, quantity: 0, entryPrice: price}
+		p = &position{side: side, quantity: 0, entryPrice: price, margin: 0, leverage: leverage}
 		t.positions[symbol] = p
 	}
 	// If switching side, flatten first
@@ -301,12 +348,14 @@ func (t *Trader) openPosition(symbol, side string, quantity float64) (map[string
 			}
 		}
 		t.mu.Lock()
-		p = &position{side: side, quantity: 0, entryPrice: price}
+		p = &position{side: side, quantity: 0, entryPrice: price, margin: 0, leverage: leverage}
 		t.positions[symbol] = p
 	}
 	newQty := p.quantity + quantity
 	p.entryPrice = (p.entryPrice*p.quantity + price*quantity) / newQty
 	p.quantity = newQty
+	p.margin += marginRequired
+	p.leverage = leverage
 	return map[string]interface{}{"price": price, "executedQty": quantity, "status": "FILLED"}, nil
 }
 
@@ -345,8 +394,13 @@ func (t *Trader) closePosition(symbol, side string, quantity float64) (map[strin
 	}
 	pnl *= quantity
 	fee := t.fee(price * quantity)
-	t.balance += price*quantity + pnl - fee
+	marginRelease := p.margin
+	if p.quantity > 0 {
+		marginRelease = p.margin * (quantity / p.quantity)
+	}
+	t.balance += marginRelease + pnl - fee
 	p.quantity -= quantity
+	p.margin -= marginRelease
 	if p.quantity == 0 {
 		delete(t.positions, symbol)
 	}
