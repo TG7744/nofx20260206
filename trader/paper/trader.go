@@ -82,6 +82,69 @@ func (t *Trader) refreshPrices(symbols []string) {
 	}
 	if t.priceSource != "binance" {
 		// mock source: keep existing cached/placeholder prices
+		if t.priceSource == "okx" {
+			client := market.NewAPIClient()
+			for _, sym := range symbols {
+				if sym == "" {
+					continue
+				}
+				if price, err := client.GetOKXSwapPrice(sym); err == nil && price > 0 {
+					t.mu.Lock()
+					t.lastPrice[sym] = price
+					t.mu.Unlock()
+				} else if err != nil {
+					logger.Infof("[paper] failed to refresh OKX price for %s: %v", sym, err)
+				}
+			}
+		} else if t.priceSource == "bybit" {
+			client := market.NewAPIClient()
+			for _, sym := range symbols {
+				if sym == "" {
+					continue
+				}
+				if price, err := client.GetBybitLinearPrice(sym); err == nil && price > 0 {
+					t.mu.Lock()
+					t.lastPrice[sym] = price
+					t.mu.Unlock()
+				}
+			}
+		} else if t.priceSource == "bitget" {
+			client := market.NewAPIClient()
+			for _, sym := range symbols {
+				if sym == "" {
+					continue
+				}
+				if price, err := client.GetBitgetSwapPrice(sym); err == nil && price > 0 {
+					t.mu.Lock()
+					t.lastPrice[sym] = price
+					t.mu.Unlock()
+				}
+			}
+		} else if t.priceSource == "gate" {
+			client := market.NewAPIClient()
+			for _, sym := range symbols {
+				if sym == "" {
+					continue
+				}
+				if price, err := client.GetGateSwapPrice(sym); err == nil && price > 0 {
+					t.mu.Lock()
+					t.lastPrice[sym] = price
+					t.mu.Unlock()
+				}
+			}
+		} else if t.priceSource == "kucoin" {
+			client := market.NewAPIClient()
+			for _, sym := range symbols {
+				if sym == "" {
+					continue
+				}
+				if price, err := client.GetKucoinSwapPrice(sym); err == nil && price > 0 {
+					t.mu.Lock()
+					t.lastPrice[sym] = price
+					t.mu.Unlock()
+				}
+			}
+		}
 		return
 	}
 	client := market.NewAPIClient()
@@ -300,9 +363,40 @@ func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
 		return price, nil
 	}
 	// Fetch live from public ticker if cache empty or placeholder
-	if t.priceSource == "binance" {
+	switch t.priceSource {
+	case "binance":
 		client := market.NewAPIClient()
 		if p, err := client.GetCurrentPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	case "okx":
+		client := market.NewAPIClient()
+		if p, err := client.GetOKXSwapPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	case "bybit":
+		client := market.NewAPIClient()
+		if p, err := client.GetBybitLinearPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	case "bitget":
+		client := market.NewAPIClient()
+		if p, err := client.GetBitgetSwapPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	case "gate":
+		client := market.NewAPIClient()
+		if p, err := client.GetGateSwapPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	case "kucoin":
+		client := market.NewAPIClient()
+		if p, err := client.GetKucoinSwapPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}

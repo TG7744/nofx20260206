@@ -894,6 +894,21 @@ export function ExchangeConfigModal({
                   <option value="binance">
                     {language === 'zh' ? '币安合约行情（默认）' : 'Binance Futures'}
                   </option>
+                  <option value="okx">
+                    {language === 'zh' ? 'OKX 合约行情' : 'OKX Futures'}
+                  </option>
+                  <option value="bybit">
+                    {language === 'zh' ? 'Bybit 合约行情' : 'Bybit Futures'}
+                  </option>
+                  <option value="bitget">
+                    {language === 'zh' ? 'Bitget 合约行情' : 'Bitget Futures'}
+                  </option>
+                  <option value="gate">
+                    {language === 'zh' ? 'Gate 合约行情' : 'Gate Futures'}
+                  </option>
+                  <option value="kucoin">
+                    {language === 'zh' ? 'KuCoin 合约行情' : 'KuCoin Futures'}
+                  </option>
                   <option value="mock">
                     {language === 'zh' ? '本地模拟（固定价）' : 'Mock (cached/100)'}
                   </option>
