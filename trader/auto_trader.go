@@ -648,6 +648,11 @@ func (at *AutoTrader) runCycle() error {
 	logger.Infof("🤖 Requesting AI analysis and decision... [Strategy Engine]")
 	aiDecision, err := kernel.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, "balanced")
 
+	// Add explicit HOLD records for existing positions if AI omitted them
+	if aiDecision != nil {
+		aiDecision.Decisions = ensureHoldDecisions(ctx.Positions, aiDecision.Decisions)
+	}
+
 	if aiDecision != nil && aiDecision.AIRequestDurationMs > 0 {
 		record.AIRequestDurationMs = aiDecision.AIRequestDurationMs
 		logger.Infof("⏱️ AI call duration: %.2f seconds", float64(record.AIRequestDurationMs)/1000)
@@ -785,6 +790,84 @@ func (at *AutoTrader) runCycle() error {
 	return nil
 }
 
+// tpSlLevels holds aggregated stop-loss / take-profit prices for both sides of a symbol
+type tpSlLevels struct {
+	longSL  float64
+	longTP  float64
+	shortSL float64
+	shortTP float64
+}
+
+// fetchTPSLFromOpenOrders pulls current open orders for given symbols and extracts TP/SL levels.
+// This works across exchanges via the unified Trader.GetOpenOrders interface, so AI context
+// can show real-time protection levels even when the exchange SDK doesn't provide them directly.
+func (at *AutoTrader) fetchTPSLFromOpenOrders(symbols []string) map[string]tpSlLevels {
+	result := make(map[string]tpSlLevels, len(symbols))
+	for _, sym := range symbols {
+		if sym == "" {
+			continue
+		}
+		orders, err := at.trader.GetOpenOrders(sym)
+		if err != nil {
+			logger.Infof("⚠️ [%s] Failed to fetch open orders for %s: %v", at.name, sym, err)
+			continue
+		}
+
+		levels := tpSlLevels{}
+		for _, ord := range orders {
+			price := ord.StopPrice
+			if price == 0 {
+				price = ord.Price
+			}
+			if price <= 0 {
+				continue
+			}
+
+			orderType := strings.ToUpper(ord.Type)
+			side := strings.ToLower(ord.PositionSide)
+
+			// One-way模式或部分交易所未返回 positionSide 时，退化用 Side 推断方向
+			if side == "" || side == "both" {
+				switch strings.ToUpper(ord.Side) {
+				case "BUY":
+					side = "long"
+				case "SELL":
+					side = "short"
+				}
+			}
+
+			isStop := strings.Contains(orderType, "STOP")
+			isTP := strings.Contains(orderType, "TAKE_PROFIT")
+
+			if !isStop && !isTP {
+				continue
+			}
+
+			switch side {
+			case "long":
+				if isStop && price > levels.longSL {
+					levels.longSL = price // tighter stop for long = higher price
+				}
+				if isTP && (levels.longTP == 0 || price < levels.longTP) {
+					levels.longTP = price // nearest TP for long
+				}
+			case "short":
+				if isStop && (levels.shortSL == 0 || price < levels.shortSL) {
+					levels.shortSL = price // tighter stop for short = lower price
+				}
+				if isTP && price > levels.shortTP {
+					levels.shortTP = price // nearest TP for short (higher is closer)
+				}
+			default:
+				// One-way mode orders (no positionSide) are ignored to avoid ambiguity
+			}
+		}
+
+		result[sym] = levels
+	}
+	return result
+}
+
 // buildTradingContext builds trading context
 func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 	// 1. Get account information
@@ -822,6 +905,19 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get positions: %w", err)
 	}
+
+	// Collect unique symbols for TP/SL lookup via open orders (works for all exchanges)
+	symbolSet := make(map[string]struct{})
+	for _, pos := range positions {
+		if sym, ok := pos["symbol"].(string); ok && sym != "" {
+			symbolSet[sym] = struct{}{}
+		}
+	}
+	symbolsForTPSL := make([]string, 0, len(symbolSet))
+	for sym := range symbolSet {
+		symbolsForTPSL = append(symbolsForTPSL, sym)
+	}
+	openOrderTPSL := at.fetchTPSLFromOpenOrders(symbolsForTPSL)
 
 	var positionInfos []kernel.PositionInfo
 	totalMarginUsed := 0.0
@@ -891,16 +987,30 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		peakPnlPct := at.peakPnLCache[posKey]
 		at.peakPnLCacheMutex.RUnlock()
 
-		// Fetch existing TP/SL from exchange (Binance supports structured fetch here)
+		// Fetch existing TP/SL from exchange (open orders for all exchanges; Binance direct API for extra accuracy)
 		stopLossPrice := 0.0
 		takeProfitPrice := 0.0
-		if bTrader, ok := at.trader.(*binance.FuturesTrader); ok {
-			sl, tp, err := bTrader.GetTPSL(symbol, strings.ToUpper(side), markPrice)
-			if err != nil {
-				logger.Infof("⚠️ [%s] Failed to get TP/SL for %s %s: %v", at.name, symbol, side, err)
+		if levels, ok := openOrderTPSL[symbol]; ok {
+			if side == "long" {
+				stopLossPrice = levels.longSL
+				takeProfitPrice = levels.longTP
 			} else {
-				stopLossPrice = sl
-				takeProfitPrice = tp
+				stopLossPrice = levels.shortSL
+				takeProfitPrice = levels.shortTP
+			}
+		}
+
+		// Binance authoritative fetch (dual/hedge 或单向模式均适用，直接覆盖为空的值)
+		if bTrader, ok := at.trader.(*binance.FuturesTrader); ok && markPrice > 0 {
+			if sl, tp, err := bTrader.GetTPSL(symbol, strings.ToUpper(side), markPrice); err == nil {
+				if stopLossPrice == 0 {
+					stopLossPrice = sl
+				}
+				if takeProfitPrice == 0 {
+					takeProfitPrice = tp
+				}
+			} else {
+				logger.Infof("⚠️ [%s] Failed to get TP/SL for %s %s via Binance API: %v", at.name, symbol, side, err)
 			}
 		}
 
@@ -1910,6 +2020,51 @@ func calculatePnLPercentage(unrealizedPnl, marginUsed float64) float64 {
 		return (unrealizedPnl / marginUsed) * 100
 	}
 	return 0.0
+}
+
+// ensureHoldDecisions adds explicit hold actions for open positions that the AI omitted,
+// so real traders still see their holdings marked as HOLD in decision logs/UX.
+func ensureHoldDecisions(positions []kernel.PositionInfo, decisions []kernel.Decision) []kernel.Decision {
+	if len(positions) == 0 {
+		return decisions
+	}
+
+	covered := make(map[string]bool)
+	for _, d := range decisions {
+		for _, key := range decisionCoverageKeys(d) {
+			covered[key] = true
+		}
+	}
+
+	for _, pos := range positions {
+		key := strings.ToUpper(pos.Symbol) + "_" + strings.ToLower(pos.Side)
+		if covered[key] {
+			continue
+		}
+		decisions = append(decisions, kernel.Decision{
+			Symbol:    pos.Symbol,
+			Action:    "hold",
+			Reasoning: fmt.Sprintf("Maintain existing %s position; AI response did not include this symbol", pos.Side),
+		})
+		covered[key] = true
+	}
+
+	return decisions
+}
+
+// decisionCoverageKeys returns symbol_side keys covered by a decision to avoid duplicate holds.
+func decisionCoverageKeys(d kernel.Decision) []string {
+	symbol := strings.ToUpper(d.Symbol)
+	switch d.Action {
+	case "open_long", "close_long":
+		return []string{symbol + "_long"}
+	case "open_short", "close_short":
+		return []string{symbol + "_short"}
+	case "update_tp_sl", "hold", "wait":
+		return []string{symbol + "_long", symbol + "_short"}
+	default:
+		return nil
+	}
 }
 
 // sortDecisionsByPriority sorts decisions: close positions first, then open positions, finally hold/wait

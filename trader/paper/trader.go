@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"nofx/logger"
 	"nofx/market"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ type position struct {
 	entryPrice float64
 	margin     float64 // total margin locked for this position
 	leverage   int
+	stopLoss   float64
+	takeProfit float64
 }
 
 // Trader is a lightweight paper trader implementing types.Trader interface (subset needed by auto_trader)
@@ -196,6 +199,8 @@ func (t *Trader) GetBalance() (map[string]interface{}, error) {
 	}
 	t.mu.Unlock()
 	t.refreshPrices(symbols)
+	// After价格更新，检查是否触发止盈止损
+	t.triggerStopsIfHit()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -270,6 +275,8 @@ func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
 	}
 	t.mu.Unlock()
 	t.refreshPrices(symbols)
+	// 触发止盈止损（使用最新价格）
+	t.triggerStopsIfHit()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -498,18 +505,70 @@ func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
 }
 
 func (t *Trader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
-	// No-op in paper trader
+	if stopPrice <= 0 {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p, ok := t.positions[symbol]
+	if !ok || p.quantity == 0 {
+		return nil
+	}
+	// 只在同侧仓位上设置
+	if (p.side == "long" && strings.ToUpper(positionSide) != "LONG") ||
+		(p.side == "short" && strings.ToUpper(positionSide) != "SHORT") {
+		return nil
+	}
+	p.stopLoss = stopPrice
 	return nil
 }
 
 func (t *Trader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
+	if takeProfitPrice <= 0 {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p, ok := t.positions[symbol]
+	if !ok || p.quantity == 0 {
+		return nil
+	}
+	if (p.side == "long" && strings.ToUpper(positionSide) != "LONG") ||
+		(p.side == "short" && strings.ToUpper(positionSide) != "SHORT") {
+		return nil
+	}
+	p.takeProfit = takeProfitPrice
 	return nil
 }
 
-func (t *Trader) CancelStopLossOrders(symbol string) error   { return nil }
-func (t *Trader) CancelTakeProfitOrders(symbol string) error { return nil }
-func (t *Trader) CancelAllOrders(symbol string) error        { return nil }
-func (t *Trader) CancelStopOrders(symbol string) error       { return nil }
+func (t *Trader) CancelStopLossOrders(symbol string) error {
+	t.mu.Lock()
+	if p, ok := t.positions[symbol]; ok {
+		p.stopLoss = 0
+	}
+	t.mu.Unlock()
+	return nil
+}
+func (t *Trader) CancelTakeProfitOrders(symbol string) error {
+	t.mu.Lock()
+	if p, ok := t.positions[symbol]; ok {
+		p.takeProfit = 0
+	}
+	t.mu.Unlock()
+	return nil
+}
+func (t *Trader) CancelAllOrders(symbol string) error {
+	t.mu.Lock()
+	if p, ok := t.positions[symbol]; ok {
+		p.stopLoss = 0
+		p.takeProfit = 0
+	}
+	t.mu.Unlock()
+	return nil
+}
+func (t *Trader) CancelStopOrders(symbol string) error {
+	return t.CancelAllOrders(symbol)
+}
 
 func (t *Trader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	return fmt.Sprintf("%.6f", quantity), nil
@@ -524,5 +583,93 @@ func (t *Trader) GetClosedPnL(startTime time.Time, limit int) ([]types.ClosedPnL
 }
 
 func (t *Trader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
-	return []types.OpenOrder{}, nil
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p, ok := t.positions[symbol]
+	if !ok || p.quantity == 0 {
+		return []types.OpenOrder{}, nil
+	}
+	var res []types.OpenOrder
+	if p.stopLoss > 0 {
+		res = append(res, types.OpenOrder{
+			OrderID:      "paper-sl-" + symbol,
+			Symbol:       symbol,
+			Side:         sideForClose(p.side),
+			PositionSide: strings.ToUpper(p.side),
+			Type:         "STOP_MARKET",
+			StopPrice:    p.stopLoss,
+			Quantity:     p.quantity,
+			Status:       "NEW",
+		})
+	}
+	if p.takeProfit > 0 {
+		res = append(res, types.OpenOrder{
+			OrderID:      "paper-tp-" + symbol,
+			Symbol:       symbol,
+			Side:         sideForClose(p.side),
+			PositionSide: strings.ToUpper(p.side),
+			Type:         "TAKE_PROFIT_MARKET",
+			StopPrice:    p.takeProfit,
+			Quantity:     p.quantity,
+			Status:       "NEW",
+		})
+	}
+	return res, nil
+}
+
+// sideForClose returns closing side for a given position direction.
+func sideForClose(posSide string) string {
+	if posSide == "long" {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+// triggerStopsIfHit checks price vs stored SL/TP and closes positions when触发.
+func (t *Trader) triggerStopsIfHit() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for sym, p := range t.positions {
+		if p.quantity == 0 {
+			continue
+		}
+		price := t.getPrice(sym)
+		hitSL := false
+		hitTP := false
+
+		if p.side == "long" {
+			if p.stopLoss > 0 && price <= p.stopLoss {
+				hitSL = true
+			}
+			if p.takeProfit > 0 && price >= p.takeProfit {
+				hitTP = true
+			}
+		} else { // short
+			if p.stopLoss > 0 && price >= p.stopLoss {
+				hitSL = true
+			}
+			if p.takeProfit > 0 && price <= p.takeProfit {
+				hitTP = true
+			}
+		}
+
+		if hitSL || hitTP {
+			// unlock to reuse closePosition (which locks)
+			side := p.side
+			qty := p.quantity
+			t.mu.Unlock()
+			if side == "long" {
+				t.CloseLong(sym, qty)
+			} else {
+				t.CloseShort(sym, qty)
+			}
+			t.mu.Lock()
+			// clear stored levels for safety
+			if np, ok := t.positions[sym]; ok {
+				np.stopLoss = 0
+				np.takeProfit = 0
+			}
+		}
+	}
 }
