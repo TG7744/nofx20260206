@@ -884,7 +884,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     lighterWalletAddr?: string,
     lighterPrivateKey?: string,
     lighterApiKeyPrivateKey?: string,
-    lighterApiKeyIndex?: number
+    lighterApiKeyIndex?: number,
+    paperFeeRate?: number,
+    paperSlippageBps?: number,
+    paperPriceSource?: string
   ) => {
     try {
       if (exchangeId) {
@@ -903,6 +906,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               secret_key: secretKey || '',
               passphrase: passphrase || '',
               testnet: testnet || false,
+              paper_fee_rate:
+                paperFeeRate ??
+                existingExchange.paper_fee_rate ??
+                0.0004,
+              paper_slippage_bps:
+                paperSlippageBps ??
+                existingExchange.paper_slippage_bps ??
+                2,
+              paper_price_source:
+                paperPriceSource ??
+                existingExchange.paper_price_source ??
+                'binance',
               hyperliquid_wallet_addr: hyperliquidWalletAddr || '',
               aster_user: asterUser || '',
               aster_signer: asterSigner || '',
@@ -933,6 +948,9 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           exchange_type: exchangeType,
           account_name: accountName,
           enabled: true,
+          paper_fee_rate: paperFeeRate ?? 0.0004,
+          paper_slippage_bps: paperSlippageBps ?? 2,
+          paper_price_source: paperPriceSource ?? 'binance',
           api_key: apiKey || '',
           secret_key: secretKey || '',
           passphrase: passphrase || '',

@@ -2,6 +2,8 @@ package paper
 
 import (
 	"fmt"
+	"nofx/logger"
+	"nofx/market"
 	"sync"
 	"time"
 
@@ -20,6 +22,11 @@ type Trader struct {
 	mu        sync.Mutex
 	balance   float64
 	positions map[string]*position // key: symbol
+	lastPrice map[string]float64   // external price hints
+
+	feeRate     float64 // default 4 bps
+	slippageBps float64 // default 2 bps
+	priceSource string  // binance/mock
 }
 
 // NewPaperTrader creates a new paper trader with given starting balance
@@ -28,34 +35,138 @@ func NewPaperTrader(initialBalance float64) *Trader {
 		initialBalance = 10000 // fallback
 	}
 	return &Trader{
-		balance:   initialBalance,
-		positions: make(map[string]*position),
+		balance:     initialBalance,
+		positions:   make(map[string]*position),
+		lastPrice:   make(map[string]float64),
+		feeRate:     0.0004,
+		slippageBps: 2,
+		priceSource: "binance",
 	}
 }
 
+// SetFeeRate overrides the default trading fee rate (e.g., 0.0004 == 4 bps)
+func (t *Trader) SetFeeRate(rate float64) {
+	if rate <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.feeRate = rate
+	t.mu.Unlock()
+}
+
+// SetSlippageBps overrides the default slippage in basis points
+func (t *Trader) SetSlippageBps(bps float64) {
+	if bps < 0 {
+		return
+	}
+	t.mu.Lock()
+	t.slippageBps = bps
+	t.mu.Unlock()
+}
+
+// SetPriceSource overrides price source (binance/mock)
+func (t *Trader) SetPriceSource(src string) {
+	if src == "" {
+		return
+	}
+	t.mu.Lock()
+	t.priceSource = src
+	t.mu.Unlock()
+}
+
 // --- Helper ---
+// refreshPrices pulls latest price for held symbols from Binance futures ticker (public endpoint)
+func (t *Trader) refreshPrices(symbols []string) {
+	if len(symbols) == 0 {
+		return
+	}
+	if t.priceSource != "binance" {
+		// mock source: keep existing cached/placeholder prices
+		return
+	}
+	client := market.NewAPIClient()
+	for _, sym := range symbols {
+		if sym == "" {
+			continue
+		}
+		if price, err := client.GetCurrentPrice(sym); err == nil && price > 0 {
+			t.mu.Lock()
+			t.lastPrice[sym] = price
+			t.mu.Unlock()
+		} else if err != nil {
+			logger.Infof("[paper] failed to refresh price for %s: %v", sym, err)
+		}
+	}
+}
+
 func (t *Trader) getPrice(symbol string) float64 {
+	if p, ok := t.lastPrice[symbol]; ok && p > 0 {
+		return p
+	}
 	// Simple constant price; in future can be wired to live feed
 	return 100.0
 }
 
 func (t *Trader) fee(amount float64) float64 {
-	return amount * 0.0004 // 4 bps default taker fee
+	return amount * t.feeRate
+}
+
+// SetLastPrice allows external caller to update latest price for a symbol (used for executions/marking)
+func (t *Trader) SetLastPrice(symbol string, price float64) {
+	if price <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.lastPrice[symbol] = price
+	t.mu.Unlock()
 }
 
 // --- Interface implementation ---
 func (t *Trader) GetBalance() (map[string]interface{}, error) {
+	// Refresh prices for current positions before computing equity
+	t.mu.Lock()
+	symbols := make([]string, 0, len(t.positions))
+	for sym := range t.positions {
+		symbols = append(symbols, sym)
+	}
+	t.mu.Unlock()
+	t.refreshPrices(symbols)
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	unrealized := 0.0
+	for sym, p := range t.positions {
+		if p.quantity == 0 {
+			continue
+		}
+		cur := t.getPrice(sym)
+		u := (cur - p.entryPrice)
+		if p.side == "short" {
+			u = -u
+		}
+		unrealized += u * p.quantity
+	}
+	equity := t.balance + unrealized
 	return map[string]interface{}{
-		"total_equity":       t.balance,
-		"totalWalletBalance": t.balance,
-		"wallet_balance":     t.balance,
-		"balance":            t.balance,
+		"total_equity":       equity,
+		"totalWalletBalance": equity,
+		"wallet_balance":     equity,
+		"balance":            equity,
+		"availableBalance":   equity,
+		"available_balance":  equity,
 	}, nil
 }
 
 func (t *Trader) GetPositions() ([]map[string]interface{}, error) {
+	// Refresh prices for positions first
+	t.mu.Lock()
+	symbols := make([]string, 0, len(t.positions))
+	for sym := range t.positions {
+		symbols = append(symbols, sym)
+	}
+	t.mu.Unlock()
+	t.refreshPrices(symbols)
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var res []map[string]interface{}
@@ -96,6 +207,12 @@ func (t *Trader) openPosition(symbol, side string, quantity float64) (map[string
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	price := t.getPrice(symbol)
+	// apply slippage
+	if side == "long" {
+		price *= 1 + t.slippageBps/10000.0
+	} else {
+		price *= 1 - t.slippageBps/10000.0
+	}
 	cost := price * quantity
 	fee := t.fee(cost)
 	if t.balance < cost+fee {
@@ -152,6 +269,12 @@ func (t *Trader) closePosition(symbol, side string, quantity float64) (map[strin
 		quantity = p.quantity
 	}
 	price := t.getPrice(symbol)
+	// reverse slippage on exit
+	if side == "long" {
+		price *= 1 - t.slippageBps/10000.0
+	} else {
+		price *= 1 + t.slippageBps/10000.0
+	}
 	// PnL
 	pnl := (price - p.entryPrice)
 	if side == "short" {
@@ -171,7 +294,20 @@ func (t *Trader) SetLeverage(symbol string, leverage int) error         { return
 func (t *Trader) SetMarginMode(symbol string, isCrossMargin bool) error { return nil }
 
 func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
-	return t.getPrice(symbol), nil
+	// Try cached
+	price := t.getPrice(symbol)
+	if price != 100.0 || symbol == "" {
+		return price, nil
+	}
+	// Fetch live from public ticker if cache empty or placeholder
+	if t.priceSource == "binance" {
+		client := market.NewAPIClient()
+		if p, err := client.GetCurrentPrice(symbol); err == nil && p > 0 {
+			t.SetLastPrice(symbol, p)
+			return p, nil
+		}
+	}
+	return price, nil
 }
 
 func (t *Trader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {

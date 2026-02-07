@@ -36,6 +36,11 @@ type AutoTraderConfig struct {
 	Exchange   string // Exchange type: "binance", "bybit", "okx", "bitget", "gate", "hyperliquid", "aster" or "lighter"
 	ExchangeID string // Exchange account UUID (for multi-account support)
 
+	// Paper trading configuration
+	PaperFeeRate     float64 // Trading fee rate for paper exchange (e.g., 0.0004 for 4 bps)
+	PaperSlippageBps float64 // Slippage in basis points for paper exchange (e.g., 2)
+	PaperPriceSource string  // Price source for paper trading (e.g., binance/mock)
+
 	// Binance API configuration
 	BinanceAPIKey    string
 	BinanceSecretKey string
@@ -296,7 +301,18 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		logger.Infof("✓ LIGHTER trader initialized successfully")
 	case "paper":
 		logger.Infof("🏦 [%s] Using Paper trading (simulation)", config.Name)
-		trader = paper.NewPaperTrader(config.InitialBalance)
+		pTrader := paper.NewPaperTrader(config.InitialBalance)
+		if config.PaperFeeRate > 0 {
+			pTrader.SetFeeRate(config.PaperFeeRate)
+		}
+		if config.PaperSlippageBps >= 0 {
+			pTrader.SetSlippageBps(config.PaperSlippageBps)
+		}
+		if config.PaperPriceSource != "" {
+			pTrader.SetPriceSource(config.PaperPriceSource)
+		}
+		// Prime with any symbol price later before order
+		trader = pTrader
 	default:
 		return nil, fmt.Errorf("unsupported trading platform: %s", config.Exchange)
 	}
@@ -1284,6 +1300,20 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 	quantity := actualPositionSize / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
+
+	// For paper trading, feed latest price into paper trader for consistent fills/mark
+	if at.config.Exchange == "paper" {
+		if p, ok := at.trader.(*paper.Trader); ok {
+			p.SetLastPrice(decision.Symbol, marketData.CurrentPrice)
+		}
+	}
+
+	// For paper trading, feed latest price into paper trader for consistent fills/mark
+	if at.config.Exchange == "paper" {
+		if p, ok := at.trader.(*paper.Trader); ok {
+			p.SetLastPrice(decision.Symbol, marketData.CurrentPrice)
+		}
+	}
 
 	// Set margin mode
 	if err := at.trader.SetMarginMode(decision.Symbol, at.config.IsCrossMargin); err != nil {

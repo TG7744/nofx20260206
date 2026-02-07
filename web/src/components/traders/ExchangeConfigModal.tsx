@@ -65,7 +65,10 @@ interface ExchangeConfigModalProps {
     lighterWalletAddr?: string,
     lighterPrivateKey?: string,
     lighterApiKeyPrivateKey?: string,
-    lighterApiKeyIndex?: number
+    lighterApiKeyIndex?: number,
+    paperFeeRate?: number,
+    paperSlippageBps?: number,
+    paperPriceSource?: string
   ) => Promise<void>
   onDelete: (exchangeId: string) => void
   onClose: () => void
@@ -219,6 +222,11 @@ export function ExchangeConfigModal({
   const [lighterApiKeyPrivateKey, setLighterApiKeyPrivateKey] = useState('')
   const [lighterApiKeyIndex, setLighterApiKeyIndex] = useState(0)
 
+  // Paper fields
+  const [paperFeeRate, setPaperFeeRate] = useState(0.0004)
+  const [paperSlippageBps, setPaperSlippageBps] = useState(2)
+  const [paperPriceSource, setPaperPriceSource] = useState('binance')
+
   // Other state
   const [secureInputTarget, setSecureInputTarget] = useState<
     null | 'hyperliquid' | 'aster' | 'lighter'
@@ -290,6 +298,19 @@ export function ExchangeConfigModal({
       setLighterWalletAddr(selectedExchange.lighterWalletAddr || '')
       setLighterApiKeyPrivateKey('')
       setLighterApiKeyIndex(selectedExchange.lighterApiKeyIndex || 0)
+      setPaperFeeRate(
+        selectedExchange.paper_fee_rate !== undefined
+          ? selectedExchange.paper_fee_rate
+          : 0.0004
+      )
+      setPaperSlippageBps(
+        selectedExchange.paper_slippage_bps !== undefined
+          ? selectedExchange.paper_slippage_bps
+          : 2
+      )
+      setPaperPriceSource(
+        selectedExchange.paper_price_source || 'binance'
+      )
     }
   }, [editingExchangeId, selectedExchange])
 
@@ -399,7 +420,20 @@ export function ExchangeConfigModal({
           exchangeType,
           trimmedAccountName || 'Paper',
           '',
-          ''
+          '',
+          '',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          paperFeeRate ?? 0.0004,
+          paperSlippageBps ?? 2,
+          paperPriceSource
         )
       } else if (
         currentExchangeType === 'binance' ||
@@ -789,13 +823,88 @@ export function ExchangeConfigModal({
                     border: '1px solid #2B3139',
                     color: '#EAECEF',
                   }}
-                  required
+              required
+            />
+          </div>
+
+          {/* Paper config */}
+          {currentExchangeType === 'paper' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label
+                  className="flex items-center gap-2 text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {language === 'zh' ? '手续费率(例如0.0004)' : 'Fee Rate'}
+                </label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  value={paperFeeRate}
+                  onChange={(e) => setPaperFeeRate(parseFloat(e.target.value))}
+                  className="w-full px-4 py-3 rounded-xl text-base"
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
                 />
               </div>
+              <div className="space-y-2">
+                <label
+                  className="flex items-center gap-2 text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {language === 'zh' ? '滑点(bp)' : 'Slippage (bps)'}
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={paperSlippageBps}
+                  onChange={(e) =>
+                    setPaperSlippageBps(parseFloat(e.target.value))
+                  }
+                  className="w-full px-4 py-3 rounded-xl text-base"
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                />
+              </div>
+              <div className="space-y-2 sm:col-span-2">
+                <label
+                  className="flex items-center gap-2 text-sm font-semibold"
+                  style={{ color: '#EAECEF' }}
+                >
+                  {language === 'zh' ? '行情源' : 'Price Source'}
+                </label>
+                <select
+                  value={paperPriceSource}
+                  onChange={(e) => setPaperPriceSource(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl text-base"
+                  style={{
+                    background: '#0B0E11',
+                    border: '1px solid #2B3139',
+                    color: '#EAECEF',
+                  }}
+                >
+                  <option value="binance">
+                    {language === 'zh' ? '币安合约行情（默认）' : 'Binance Futures'}
+                  </option>
+                  <option value="mock">
+                    {language === 'zh' ? '本地模拟（固定价）' : 'Mock (cached/100)'}
+                  </option>
+                </select>
+              </div>
+            </div>
+          )}
 
-              {/* CEX Fields */}
-              {(currentExchangeType === 'binance' ||
-                currentExchangeType === 'bybit' ||
+          {/* CEX Fields */}
+          {(currentExchangeType === 'binance' ||
+            currentExchangeType === 'bybit' ||
                 currentExchangeType === 'okx' ||
                 currentExchangeType === 'bitget' ||
                 currentExchangeType === 'gate' ||

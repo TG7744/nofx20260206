@@ -128,6 +128,9 @@ export interface Exchange {
   name: string // Display name
   type: 'cex' | 'dex'
   enabled: boolean
+  paper_fee_rate?: number
+  paper_slippage_bps?: number
+  paper_price_source?: string
   apiKey?: string
   secretKey?: string
   passphrase?: string // OKX specific
@@ -149,6 +152,9 @@ export interface CreateExchangeRequest {
   exchange_type: string // "binance", "bybit", "okx", "hyperliquid", "aster", "lighter"
   account_name: string // User-defined account name
   enabled: boolean
+  paper_fee_rate?: number
+  paper_slippage_bps?: number
+  paper_price_source?: string
   api_key?: string
   secret_key?: string
   passphrase?: string
@@ -205,6 +211,9 @@ export interface UpdateExchangeConfigRequest {
       secret_key: string
       passphrase?: string
       testnet?: boolean
+      paper_fee_rate?: number
+      paper_slippage_bps?: number
+      paper_price_source?: string
       // Hyperliquid 特定字段
       hyperliquid_wallet_addr?: string
       // Aster 特定字段

@@ -25,6 +25,9 @@ type Exchange struct {
 	Name                    string                 `gorm:"not null" json:"name"`
 	Type                    string                 `gorm:"not null" json:"type"` // "cex" or "dex"
 	Enabled                 bool                   `gorm:"default:false" json:"enabled"`
+	PaperFeeRate            float64                `gorm:"column:paper_fee_rate;default:0.0004" json:"paper_fee_rate,omitempty"`
+	PaperSlippageBps        float64                `gorm:"column:paper_slippage_bps;default:2" json:"paper_slippage_bps,omitempty"`
+	PaperPriceSource        string                 `gorm:"column:paper_price_source;default:'binance'" json:"paper_price_source,omitempty"` // binance / mock
 	APIKey                  crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
 	SecretKey               crypto.EncryptedString `gorm:"column:secret_key;default:''" json:"secretKey"`
 	Passphrase              crypto.EncryptedString `gorm:"column:passphrase;default:''" json:"passphrase"`
@@ -151,16 +154,19 @@ func (s *ExchangeStore) EnsurePaperExchange(userID string) (*Exchange, error) {
 	// Create default paper exchange
 	id := uuid.New().String()
 	paper := &Exchange{
-		ID:           id,
-		ExchangeType: "paper",
-		AccountName:  "Paper",
-		UserID:       userID,
-		Name:         "Paper Trading",
-		Type:         "paper",
-		Enabled:      true,
-		Testnet:      false,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:               id,
+		ExchangeType:     "paper",
+		AccountName:      "Paper",
+		UserID:           userID,
+		Name:             "Paper Trading",
+		Type:             "paper",
+		Enabled:          true,
+		Testnet:          false,
+		PaperFeeRate:     0.0004,
+		PaperSlippageBps: 2,
+		PaperPriceSource: "binance",
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
 	}
 	if err := s.db.Create(paper).Error; err != nil {
 		return nil, err
@@ -215,6 +221,7 @@ func getExchangeNameAndType(exchangeType string) (name string, typ string) {
 
 // Create creates a new exchange account with UUID
 func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled bool,
+	paperFeeRate, paperSlippageBps float64, paperPriceSource string,
 	apiKey, secretKey, passphrase string, testnet bool,
 	hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey,
 	lighterWalletAddr, lighterPrivateKey, lighterApiKeyPrivateKey string, lighterApiKeyIndex int) (string, error) {
@@ -237,6 +244,9 @@ func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled
 		Name:                    name,
 		Type:                    typ,
 		Enabled:                 enabled,
+		PaperFeeRate:            paperFeeRate,
+		PaperSlippageBps:        paperSlippageBps,
+		PaperPriceSource:        paperPriceSource,
 		APIKey:                  crypto.EncryptedString(apiKey),
 		SecretKey:               crypto.EncryptedString(secretKey),
 		Passphrase:              crypto.EncryptedString(passphrase),
@@ -259,6 +269,7 @@ func (s *ExchangeStore) Create(userID, exchangeType, accountName string, enabled
 
 // Update updates exchange configuration by UUID
 func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKey, passphrase string, testnet bool,
+	paperFeeRate, paperSlippageBps float64, paperPriceSource string,
 	hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey, lighterWalletAddr, lighterPrivateKey, lighterApiKeyPrivateKey string, lighterApiKeyIndex int) error {
 
 	logger.Debugf("🔧 ExchangeStore.Update: userID=%s, id=%s, enabled=%v", userID, id, enabled)
@@ -266,6 +277,9 @@ func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKe
 	updates := map[string]interface{}{
 		"enabled":                 enabled,
 		"testnet":                 testnet,
+		"paper_fee_rate":          paperFeeRate,
+		"paper_slippage_bps":      paperSlippageBps,
+		"paper_price_source":      paperPriceSource,
 		"hyperliquid_wallet_addr": hyperliquidWalletAddr,
 		"aster_user":              asterUser,
 		"aster_signer":            asterSigner,
@@ -341,7 +355,7 @@ func (s *ExchangeStore) CreateLegacy(userID, id, name, typ string, enabled bool,
 
 	// Check if this is an old-style ID (exchange type as ID)
 	if id == "binance" || id == "bybit" || id == "okx" || id == "bitget" || id == "hyperliquid" || id == "aster" || id == "lighter" {
-		_, err := s.Create(userID, id, "Default", enabled, apiKey, secretKey, "", testnet,
+		_, err := s.Create(userID, id, "Default", enabled, 0.0004, 2, "binance", apiKey, secretKey, "", testnet,
 			hyperliquidWalletAddr, asterUser, asterSigner, asterPrivateKey, "", "", "", 0)
 		return err
 	}
