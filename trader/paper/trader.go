@@ -344,38 +344,48 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 	if quantity <= 0 {
 		return nil, fmt.Errorf("quantity must be > 0")
 	}
+	// Fetch the freshest market price before locking to avoid the 100.0 placeholder
+	price, err := t.GetMarketPrice(symbol)
+	if err != nil {
+		return nil, fmt.Errorf("market price unavailable for %s: %w", symbol, err)
+	}
+	if price <= 0 {
+		return nil, fmt.Errorf("market price unavailable for %s: non-positive price", symbol)
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	price := t.getPrice(symbol)
+
+	tradePrice := price
 	// apply slippage
 	if side == "long" {
-		price *= 1 + t.slippageBps/10000.0
+		tradePrice *= 1 + t.slippageBps/10000.0
 	} else {
-		price *= 1 - t.slippageBps/10000.0
+		tradePrice *= 1 - t.slippageBps/10000.0
 	}
 	// leverage-aware margin (futures style)
 	if leverage < 1 {
 		leverage = 1
 	}
-	marginRequired := (price * quantity) / float64(leverage)
-	fee := t.fee(price * quantity)
+	marginRequired := (tradePrice * quantity) / float64(leverage)
+	fee := t.fee(tradePrice * quantity)
 	if t.balance < marginRequired+fee {
 		// auto-scale position to max affordable size instead of failing
-		reqPerQty := (price / float64(leverage)) + price*t.feeRate
+		reqPerQty := (tradePrice / float64(leverage)) + tradePrice*t.feeRate
 		maxQty := t.balance / reqPerQty
 		if maxQty <= 0 {
-			logger.Infof("[paper] insufficient balance: bal=%.4f price=%.4f qty=%.6f lev=%d margin=%.4f fee=%.4f reqPerQty=%.6f source=%s", t.balance, price, quantity, leverage, marginRequired, fee, reqPerQty, t.priceSource)
+			logger.Infof("[paper] insufficient balance: bal=%.4f price=%.4f qty=%.6f lev=%d margin=%.4f fee=%.4f reqPerQty=%.6f source=%s", t.balance, tradePrice, quantity, leverage, marginRequired, fee, reqPerQty, t.priceSource)
 			return nil, fmt.Errorf("insufficient balance")
 		}
-		logger.Infof("[paper] auto-resize qty from %.6f to %.6f due to balance %.4f (price=%.4f lev=%d)", quantity, maxQty, t.balance, price, leverage)
+		logger.Infof("[paper] auto-resize qty from %.6f to %.6f due to balance %.4f (price=%.4f lev=%d)", quantity, maxQty, t.balance, tradePrice, leverage)
 		quantity = maxQty
-		marginRequired = (price * quantity) / float64(leverage)
-		fee = t.fee(price * quantity)
+		marginRequired = (tradePrice * quantity) / float64(leverage)
+		fee = t.fee(tradePrice * quantity)
 	}
 	t.balance -= marginRequired + fee
 	p, ok := t.positions[symbol]
 	if !ok {
-		p = &position{side: side, quantity: 0, entryPrice: price, margin: 0, leverage: leverage}
+		p = &position{side: side, quantity: 0, entryPrice: tradePrice, margin: 0, leverage: leverage}
 		t.positions[symbol] = p
 	}
 	// If switching side, flatten first
@@ -392,17 +402,17 @@ func (t *Trader) openPosition(symbol, side string, quantity float64, leverage in
 			}
 		}
 		t.mu.Lock()
-		p = &position{side: side, quantity: 0, entryPrice: price, margin: 0, leverage: leverage}
+		p = &position{side: side, quantity: 0, entryPrice: tradePrice, margin: 0, leverage: leverage}
 		t.positions[symbol] = p
 	}
 	newQty := p.quantity + quantity
-	p.entryPrice = (p.entryPrice*p.quantity + price*quantity) / newQty
+	p.entryPrice = (p.entryPrice*p.quantity + tradePrice*quantity) / newQty
 	p.quantity = newQty
 	p.margin += marginRequired
 	p.leverage = leverage
 	// Cache latest trade price so unrealized PnL falls back to entry if ticker fetch fails
-	t.lastPrice[symbol] = price
-	return map[string]interface{}{"price": price, "executedQty": quantity, "status": "FILLED"}, nil
+	t.lastPrice[symbol] = tradePrice
+	return map[string]interface{}{"price": tradePrice, "executedQty": quantity, "status": "FILLED"}, nil
 }
 
 func (t *Trader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
@@ -417,6 +427,13 @@ func (t *Trader) closePosition(symbol, side string, quantity float64) (map[strin
 	if quantity < 0 {
 		return nil, fmt.Errorf("quantity must be >= 0")
 	}
+
+	// Fetch latest market price before locking to avoid using stale placeholder values
+	price, _ := t.GetMarketPrice(symbol)
+	if price <= 0 {
+		price = t.getPrice(symbol)
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p, ok := t.positions[symbol]
@@ -426,20 +443,21 @@ func (t *Trader) closePosition(symbol, side string, quantity float64) (map[strin
 	if quantity == 0 || quantity > p.quantity {
 		quantity = p.quantity
 	}
-	price := t.getPrice(symbol)
+
+	tradePrice := price
 	// reverse slippage on exit
 	if side == "long" {
-		price *= 1 - t.slippageBps/10000.0
+		tradePrice *= 1 - t.slippageBps/10000.0
 	} else {
-		price *= 1 + t.slippageBps/10000.0
+		tradePrice *= 1 + t.slippageBps/10000.0
 	}
 	// PnL
-	pnl := (price - p.entryPrice)
+	pnl := (tradePrice - p.entryPrice)
 	if side == "short" {
 		pnl = -pnl
 	}
 	pnl *= quantity
-	fee := t.fee(price * quantity)
+	fee := t.fee(tradePrice * quantity)
 	marginRelease := p.margin
 	if p.quantity > 0 {
 		marginRelease = p.margin * (quantity / p.quantity)
@@ -450,7 +468,10 @@ func (t *Trader) closePosition(symbol, side string, quantity float64) (map[strin
 	if p.quantity == 0 {
 		delete(t.positions, symbol)
 	}
-	return map[string]interface{}{"price": price, "executedQty": quantity, "realizedPnl": pnl}, nil
+	// Cache latest trade price for future mark/entry reference
+	t.lastPrice[symbol] = tradePrice
+
+	return map[string]interface{}{"price": tradePrice, "executedQty": quantity, "realizedPnl": pnl}, nil
 }
 
 func (t *Trader) SetLeverage(symbol string, leverage int) error         { return nil }
@@ -463,45 +484,66 @@ func (t *Trader) GetMarketPrice(symbol string) (float64, error) {
 		return price, nil
 	}
 	// Fetch live from public ticker if cache empty or placeholder
+	client := market.NewAPIClient()
+
+	// Primary source based on configured priceSource
 	switch t.priceSource {
 	case "binance":
-		client := market.NewAPIClient()
 		if p, err := client.GetCurrentPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	case "okx":
-		client := market.NewAPIClient()
 		if p, err := client.GetOKXSwapPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	case "bybit":
-		client := market.NewAPIClient()
 		if p, err := client.GetBybitLinearPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	case "bitget":
-		client := market.NewAPIClient()
 		if p, err := client.GetBitgetSwapPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	case "gate":
-		client := market.NewAPIClient()
 		if p, err := client.GetGateSwapPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	case "kucoin":
-		client := market.NewAPIClient()
 		if p, err := client.GetKucoinSwapPrice(symbol); err == nil && p > 0 {
 			t.SetLastPrice(symbol, p)
 			return p, nil
 		}
 	}
-	return price, nil
+
+	// Fallback: try other public sources sequentially to avoid 100 placeholder
+	if p, err := client.GetOKXSwapPrice(symbol); err == nil && p > 0 {
+		t.SetLastPrice(symbol, p)
+		return p, nil
+	}
+	if p, err := client.GetBybitLinearPrice(symbol); err == nil && p > 0 {
+		t.SetLastPrice(symbol, p)
+		return p, nil
+	}
+	if p, err := client.GetBitgetSwapPrice(symbol); err == nil && p > 0 {
+		t.SetLastPrice(symbol, p)
+		return p, nil
+	}
+	if p, err := client.GetGateSwapPrice(symbol); err == nil && p > 0 {
+		t.SetLastPrice(symbol, p)
+		return p, nil
+	}
+	if p, err := client.GetKucoinSwapPrice(symbol); err == nil && p > 0 {
+		t.SetLastPrice(symbol, p)
+		return p, nil
+	}
+
+	// No live source succeeded; return placeholder as last resort
+	return price, fmt.Errorf("failed to fetch market price for %s from all sources", symbol)
 }
 
 func (t *Trader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
