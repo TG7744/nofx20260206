@@ -857,6 +857,15 @@ export interface DirectionStats {
   avg_pnl: number
 }
 
+export interface MarketCacheItem {
+  symbol: string
+  timeframe: string
+  start_ts: number
+  end_ts: number
+  count: number
+  size_bytes: number
+}
+
 export interface PositionHistoryResponse {
   positions: HistoricalPosition[]
   stats: TraderStats | null

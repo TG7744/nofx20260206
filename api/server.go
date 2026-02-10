@@ -191,6 +191,11 @@ func (s *Server) setupRoutes() {
 			protected.PUT("/traders/:id/competition", s.handleToggleCompetition)
 			protected.GET("/traders/:id/grid-risk", s.handleGetGridRiskInfo)
 
+			// Market cache management
+			protected.GET("/market-cache", s.handleListMarketCache)
+			protected.POST("/market-cache/delete", s.handleDeleteMarketCache)
+			protected.GET("/market-cache/download", s.handleDownloadMarketCache)
+
 			// AI model configuration
 			protected.GET("/models", s.handleGetModelConfigs)
 			protected.PUT("/models", s.handleUpdateModelConfigs)

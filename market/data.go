@@ -1,6 +1,7 @@
 package market
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,10 @@ import (
 	"nofx/provider/coinank/coinank_api"
 	"nofx/provider/coinank/coinank_enum"
 	"nofx/provider/hyperliquid"
+	"nofx/store"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +32,236 @@ var (
 	fundingRateMap sync.Map // map[string]*FundingRateCache
 	frCacheTTL     = 1 * time.Hour
 )
+
+// Keep single-call fetch within 200 to avoid upstream rate issues.
+const maxKlineFetchLimit = 200
+const maxCacheKeep = 5000 // per symbol/timeframe, keep latest N bars in cache
+const marketCacheRoot = "data/market_cache"
+
+// indicatorPeriods holds sanitized periods (with defaults applied) for calculations
+type indicatorPeriods struct {
+	ema  []int
+	rsi  []int
+	atr  []int
+	boll []int
+}
+
+type klineCacheRecord struct {
+	OpenTime int64   `json:"open_time"`
+	Open     float64 `json:"open"`
+	High     float64 `json:"high"`
+	Low      float64 `json:"low"`
+	Close    float64 `json:"close"`
+	Volume   float64 `json:"volume"`
+}
+
+func resolveIndicatorPeriods(indicators store.IndicatorConfig) indicatorPeriods {
+	// Helpers to fall back to defaults and clamp invalid entries
+	filter := func(list []int, maxN int, defaults []int) []int {
+		out := make([]int, 0, maxN)
+		for _, v := range list {
+			if v > 0 {
+				out = append(out, v)
+			}
+			if len(out) == maxN {
+				break
+			}
+		}
+		if len(out) == 0 {
+			out = defaults
+		}
+		// Pad to maxN if defaults shorter (defensive)
+		for len(out) < maxN && len(defaults) > len(out) {
+			out = append(out, defaults[len(out)])
+		}
+		return out
+	}
+
+	return indicatorPeriods{
+		ema:  filter(indicators.EMAPeriods, 2, []int{20, 50}),
+		rsi:  filter(indicators.RSIPeriods, 2, []int{7, 14}),
+		atr:  filter(indicators.ATRPeriods, 1, []int{14}),
+		boll: filter(indicators.BOLLPeriods, 1, []int{20}),
+	}
+}
+
+// calcRequiredBars determines how many bars we need to fetch to compute all indicators
+func calcRequiredBars(count int, periods indicatorPeriods) int {
+	maxP := count
+	for _, v := range periods.ema {
+		if v > maxP {
+			maxP = v
+		}
+	}
+	for _, v := range periods.rsi {
+		if v > maxP {
+			maxP = v
+		}
+	}
+	for _, v := range periods.atr {
+		if v > maxP {
+			maxP = v
+		}
+	}
+	for _, v := range periods.boll {
+		if v > maxP {
+			maxP = v
+		}
+	}
+	// add a small buffer for warmup
+	return maxP + 5
+}
+
+// load cached klines from disk
+func loadCachedKlines(symbol, timeframe string) []Kline {
+	path := filepath.Join(marketCacheRoot, symbol, fmt.Sprintf("%s.jsonl", timeframe))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var klines []Kline
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var rec klineCacheRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		klines = append(klines, Kline{
+			OpenTime:  rec.OpenTime,
+			Open:      rec.Open,
+			High:      rec.High,
+			Low:       rec.Low,
+			Close:     rec.Close,
+			Volume:    rec.Volume,
+			CloseTime: rec.OpenTime + 1, // placeholder
+		})
+	}
+	return klines
+}
+
+// save klines to cache (append + dedup + cap latest N)
+func saveCachedKlines(symbol, timeframe string, klines []Kline) {
+	if len(klines) == 0 {
+		return
+	}
+	// ensure dir
+	path := filepath.Join(marketCacheRoot, symbol)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return
+	}
+	// sort by time
+	sort.Slice(klines, func(i, j int) bool {
+		return klines[i].OpenTime < klines[j].OpenTime
+	})
+	if len(klines) > maxCacheKeep {
+		klines = klines[len(klines)-maxCacheKeep:]
+	}
+
+	filePath := filepath.Join(path, fmt.Sprintf("%s.jsonl", timeframe))
+	tmp := filePath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return
+	}
+	writer := bufio.NewWriter(f)
+	for _, k := range klines {
+		rec := klineCacheRecord{
+			OpenTime: k.OpenTime,
+			Open:     k.Open,
+			High:     k.High,
+			Low:      k.Low,
+			Close:    k.Close,
+			Volume:   k.Volume,
+		}
+		b, _ := json.Marshal(rec)
+		writer.Write(b)
+		writer.WriteByte('\n')
+	}
+	writer.Flush()
+	f.Close()
+	os.Rename(tmp, filePath)
+}
+
+// merge and dedup klines by OpenTime
+func mergeKlines(existing, incoming []Kline) []Kline {
+	if len(existing) == 0 {
+		existing = append(existing, incoming...)
+	} else {
+		existing = append(existing, incoming...)
+	}
+	sort.Slice(existing, func(i, j int) bool {
+		return existing[i].OpenTime < existing[j].OpenTime
+	})
+	out := existing[:0]
+	var lastTime int64 = -1
+	for _, k := range existing {
+		if k.OpenTime == lastTime {
+			continue
+		}
+		out = append(out, k)
+		lastTime = k.OpenTime
+	}
+	return out
+}
+
+// truncate to latest N
+func latestNKlines(klines []Kline, n int) []Kline {
+	if len(klines) <= n {
+		return klines
+	}
+	return klines[len(klines)-n:]
+}
+
+// getKlinesWithCache fetches klines using local cache + incremental fetch (each call <=200)
+func getKlinesWithCache(symbol, timeframe, exchange string, need int, isXyzAsset bool) ([]Kline, error) {
+	cached := loadCachedKlines(symbol, timeframe)
+	cached = mergeKlines(nil, cached)
+
+	missing := need - len(cached)
+	fetchTries := 0
+
+	for missing > 0 && fetchTries < 5 {
+		limit := maxKlineFetchLimit
+		if missing < limit {
+			limit = missing
+		}
+
+		var batch []Kline
+		var err error
+		if isXyzAsset {
+			batch, err = getKlinesFromHyperliquid(symbol, timeframe, limit)
+		} else {
+			batch, err = getKlinesFromCoinAnk(symbol, timeframe, exchange, limit)
+		}
+		if err != nil {
+			break
+		}
+		if len(batch) == 0 {
+			break
+		}
+		cached = mergeKlines(cached, batch)
+		if len(cached) > maxCacheKeep {
+			cached = cached[len(cached)-maxCacheKeep:]
+		}
+		missing = need - len(cached)
+		fetchTries++
+	}
+
+	// persist cache
+	saveCachedKlines(symbol, timeframe, cached)
+
+	// return latest need bars (or whatever available)
+	return latestNKlines(cached, minInt(need, len(cached))), nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // Note: Kline data now uses free/open API (coinank_api.Kline) which doesn't require authentication
 
@@ -172,6 +407,23 @@ func Get(symbol string) (*Data, error) {
 
 // GetWithExchange retrieves market data for the specified token using exchange-specific data
 func GetWithExchange(symbol, exchange string) (*Data, error) {
+	// Use default indicator configuration for legacy path
+	indicators := store.IndicatorConfig{
+		EnableEMA:         true,
+		EnableMACD:        true,
+		EnableRSI:         true,
+		EnableATR:         true,
+		EnableBOLL:        true,
+		EMAPeriods:        []int{20, 50},
+		RSIPeriods:        []int{7, 14},
+		ATRPeriods:        []int{14},
+		BOLLPeriods:       []int{20},
+		EnableVolume:      true,
+		EnableOI:          true,
+		EnableFundingRate: true,
+	}
+	periods := resolveIndicatorPeriods(indicators)
+
 	var klines3m, klines4h []Kline
 	var err error
 	// Normalize symbol
@@ -186,13 +438,13 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 	// Get 3-minute K-line data (or 5-minute for xyz assets as 3m may not be available)
 	if useHyperliquidAPI {
 		// Use Hyperliquid API for xyz dex assets (use 5m since 3m may not be available)
-		klines3m, err = getKlinesFromHyperliquid(symbol, "5m", 100)
+		klines3m, err = getKlinesWithCache(symbol, "5m", exchange, calcRequiredBars(100, periods), true)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get 5-minute K-line from Hyperliquid: %v", err)
 		}
 	} else {
 		// Use CoinAnk for regular crypto assets with exchange-specific data
-		klines3m, err = getKlinesFromCoinAnk(symbol, "3m", exchange, 100)
+		klines3m, err = getKlinesWithCache(symbol, "3m", exchange, calcRequiredBars(100, periods), false)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get 3-minute K-line from CoinAnk (%s): %v", exchange, err)
 		}
@@ -206,12 +458,12 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 
 	// Get 4-hour K-line data
 	if useHyperliquidAPI {
-		klines4h, err = getKlinesFromHyperliquid(symbol, "4h", 100)
+		klines4h, err = getKlinesWithCache(symbol, "4h", exchange, calcRequiredBars(100, periods), true)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get 4-hour K-line from Hyperliquid: %v", err)
 		}
 	} else {
-		klines4h, err = getKlinesFromCoinAnk(symbol, "4h", exchange, 100)
+		klines4h, err = getKlinesWithCache(symbol, "4h", exchange, calcRequiredBars(100, periods), false)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get 4-hour K-line from CoinAnk (%s): %v", exchange, err)
 		}
@@ -227,9 +479,15 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 
 	// Calculate current indicators (based on 3-minute latest data)
 	currentPrice := klines3m[len(klines3m)-1].Close
-	currentEMA20 := calculateEMA(klines3m, 20)
+	var currentEMA20 float64
+	if indicators.EnableEMA && len(periods.ema) > 0 {
+		currentEMA20 = calculateEMA(klines3m, periods.ema[0])
+	}
 	currentMACD := calculateMACD(klines3m)
-	currentRSI7 := calculateRSI(klines3m, 7)
+	var currentRSI7 float64
+	if indicators.EnableRSI && len(periods.rsi) > 0 {
+		currentRSI7 = calculateRSI(klines3m, periods.rsi[0])
+	}
 
 	// Calculate price change percentage
 	// 1-hour price change = price from 20 3-minute K-lines ago
@@ -261,10 +519,10 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 	fundingRate, _ := getFundingRate(symbol)
 
 	// Calculate intraday series data
-	intradayData := calculateIntradaySeries(klines3m)
+	intradayData := calculateIntradaySeries(klines3m, indicators, periods)
 
 	// Calculate longer-term data
-	longerTermData := calculateLongerTermData(klines4h)
+	longerTermData := calculateLongerTermData(klines4h, indicators, periods)
 
 	return &Data{
 		Symbol:            symbol,
@@ -278,6 +536,10 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 		FundingRate:       fundingRate,
 		IntradaySeries:    intradayData,
 		LongerTermContext: longerTermData,
+		EMAPeriods:        periods.ema,
+		RSIPeriods:        periods.rsi,
+		ATRPeriods:        periods.atr,
+		BOLLPeriods:       periods.boll,
 	}, nil
 }
 
@@ -285,8 +547,11 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 // timeframes: list of timeframes, e.g. ["5m", "15m", "1h", "4h"]
 // primaryTimeframe: primary timeframe (used for calculating current indicators), defaults to timeframes[0]
 // count: number of K-lines for each timeframe
-func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe string, count int) (*Data, error) {
+// indicators: strategy indicator configuration (periods + switches)
+func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe string, count int, indicators store.IndicatorConfig) (*Data, error) {
 	symbol = Normalize(symbol)
+
+	periods := resolveIndicatorPeriods(indicators)
 
 	if len(timeframes) == 0 {
 		return nil, fmt.Errorf("at least one timeframe is required")
@@ -316,25 +581,14 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	// Check if this is an xyz dex asset (use Hyperliquid API)
 	isXyzAsset := IsXyzDexAsset(symbol)
 
-	// Get K-line data for each timeframe
-	for _, tf := range timeframes {
-		var klines []Kline
-		var err error
+	requiredBars := calcRequiredBars(count, periods)
 
-		if isXyzAsset {
-			// Use Hyperliquid API for xyz dex assets
-			klines, err = getKlinesFromHyperliquid(symbol, tf, 200)
-			if err != nil {
-				logger.Infof("⚠️ Failed to get %s %s K-line from Hyperliquid: %v", symbol, tf, err)
-				continue
-			}
-		} else {
-			// Use CoinAnk for regular crypto assets (default to Binance)
-			klines, err = getKlinesFromCoinAnk(symbol, tf, "binance", 200)
-			if err != nil {
-				logger.Infof("⚠️ Failed to get %s %s K-line from CoinAnk: %v", symbol, tf, err)
-				continue
-			}
+	// Get K-line data for each timeframe (with cache + incremental fetch)
+	for _, tf := range timeframes {
+		klines, err := getKlinesWithCache(symbol, tf, "binance", requiredBars, isXyzAsset)
+		if err != nil {
+			logger.Infof("⚠️ Failed to get %s %s K-line: %v", symbol, tf, err)
+			continue
 		}
 
 		if len(klines) == 0 {
@@ -348,7 +602,7 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		}
 
 		// Calculate series data for this timeframe (use count from config)
-		seriesData := calculateTimeframeSeries(klines, tf, count)
+		seriesData := calculateTimeframeSeries(klines, tf, count, indicators, periods)
 		timeframeData[tf] = seriesData
 	}
 
@@ -365,12 +619,21 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 
 	// Calculate current indicators (based on primary timeframe latest data)
 	currentPrice := primaryKlines[len(primaryKlines)-1].Close
-	currentEMA20 := calculateEMA(primaryKlines, 20)
+
+	var currentEMA float64
+	if indicators.EnableEMA && len(periods.ema) > 0 {
+		currentEMA = calculateEMA(primaryKlines, periods.ema[0])
+	}
+
 	currentMACD := calculateMACD(primaryKlines)
-	currentRSI7 := calculateRSI(primaryKlines, 7)
+
+	var currentRSI float64
+	if indicators.EnableRSI && len(periods.rsi) > 0 {
+		currentRSI = calculateRSI(primaryKlines, periods.rsi[0])
+	}
 
 	// Calculate price changes
-	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60) // 1 hour
+	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60)  // 1 hour
 	priceChange4h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 240) // 4 hours
 
 	// Get OI data
@@ -387,17 +650,21 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		CurrentPrice:  currentPrice,
 		PriceChange1h: priceChange1h,
 		PriceChange4h: priceChange4h,
-		CurrentEMA20:  currentEMA20,
+		CurrentEMA20:  currentEMA,
 		CurrentMACD:   currentMACD,
-		CurrentRSI7:   currentRSI7,
+		CurrentRSI7:   currentRSI,
 		OpenInterest:  oiData,
 		FundingRate:   fundingRate,
 		TimeframeData: timeframeData,
+		EMAPeriods:    periods.ema,
+		RSIPeriods:    periods.rsi,
+		ATRPeriods:    periods.atr,
+		BOLLPeriods:   periods.boll,
 	}, nil
 }
 
 // calculateTimeframeSeries calculates series data for a single timeframe
-func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *TimeframeSeriesData {
+func calculateTimeframeSeries(klines []Kline, timeframe string, count int, indicators store.IndicatorConfig, periods indicatorPeriods) *TimeframeSeriesData {
 	if count <= 0 {
 		count = 10 // default
 	}
@@ -438,37 +705,39 @@ func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *Time
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
 		data.Volume = append(data.Volume, klines[i].Volume)
 
-		// Calculate EMA20 for each point
-		if i >= 19 {
-			ema20 := calculateEMA(klines[:i+1], 20)
-			data.EMA20Values = append(data.EMA20Values, ema20)
-		}
-
-		// Calculate EMA50 for each point
-		if i >= 49 {
-			ema50 := calculateEMA(klines[:i+1], 50)
-			data.EMA50Values = append(data.EMA50Values, ema50)
+		// Calculate EMA for configured periods (mapped onto existing fields for backward compatibility)
+		if indicators.EnableEMA {
+			if len(periods.ema) > 0 && i >= periods.ema[0]-1 {
+				ema1 := calculateEMA(klines[:i+1], periods.ema[0])
+				data.EMA20Values = append(data.EMA20Values, ema1)
+			}
+			if len(periods.ema) > 1 && i >= periods.ema[1]-1 {
+				ema2 := calculateEMA(klines[:i+1], periods.ema[1])
+				data.EMA50Values = append(data.EMA50Values, ema2)
+			}
 		}
 
 		// Calculate MACD for each point
-		if i >= 25 {
+		if indicators.EnableMACD && i >= 25 {
 			macd := calculateMACD(klines[:i+1])
 			data.MACDValues = append(data.MACDValues, macd)
 		}
 
 		// Calculate RSI for each point
-		if i >= 7 {
-			rsi7 := calculateRSI(klines[:i+1], 7)
-			data.RSI7Values = append(data.RSI7Values, rsi7)
-		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
+		if indicators.EnableRSI {
+			if len(periods.rsi) > 0 && i >= periods.rsi[0]-1 {
+				rsi1 := calculateRSI(klines[:i+1], periods.rsi[0])
+				data.RSI7Values = append(data.RSI7Values, rsi1)
+			}
+			if len(periods.rsi) > 1 && i >= periods.rsi[1]-1 {
+				rsi2 := calculateRSI(klines[:i+1], periods.rsi[1])
+				data.RSI14Values = append(data.RSI14Values, rsi2)
+			}
 		}
 
-		// Calculate Bollinger Bands (period 20, std dev multiplier 2)
-		if i >= 19 {
-			upper, middle, lower := calculateBOLL(klines[:i+1], 20, 2.0)
+		// Calculate Bollinger Bands
+		if indicators.EnableBOLL && len(periods.boll) > 0 && i >= periods.boll[0]-1 {
+			upper, middle, lower := calculateBOLL(klines[:i+1], periods.boll[0], 2.0)
 			data.BOLLUpper = append(data.BOLLUpper, upper)
 			data.BOLLMiddle = append(data.BOLLMiddle, middle)
 			data.BOLLLower = append(data.BOLLLower, lower)
@@ -476,7 +745,9 @@ func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *Time
 	}
 
 	// Calculate ATR14
-	data.ATR14 = calculateATR(klines, 14)
+	if indicators.EnableATR && len(periods.atr) > 0 {
+		data.ATR14 = calculateATR(klines, periods.atr[0])
+	}
 
 	return data
 }
@@ -693,7 +964,7 @@ func calculateBOLL(klines []Kline, period int, multiplier float64) (upper, middl
 }
 
 // calculateIntradaySeries calculates intraday series data
-func calculateIntradaySeries(klines []Kline) *IntradayData {
+func calculateIntradaySeries(klines []Kline, indicators store.IndicatorConfig, periods indicatorPeriods) *IntradayData {
 	data := &IntradayData{
 		MidPrices:   make([]float64, 0, 10),
 		EMA20Values: make([]float64, 0, 10),
@@ -713,49 +984,60 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
 		data.Volume = append(data.Volume, klines[i].Volume)
 
-		// Calculate EMA20 for each point
-		if i >= 19 {
-			ema20 := calculateEMA(klines[:i+1], 20)
-			data.EMA20Values = append(data.EMA20Values, ema20)
+		// Calculate EMA
+		if indicators.EnableEMA && len(periods.ema) > 0 && i >= periods.ema[0]-1 {
+			ema := calculateEMA(klines[:i+1], periods.ema[0])
+			data.EMA20Values = append(data.EMA20Values, ema)
 		}
 
 		// Calculate MACD for each point
-		if i >= 25 {
+		if indicators.EnableMACD && i >= 25 {
 			macd := calculateMACD(klines[:i+1])
 			data.MACDValues = append(data.MACDValues, macd)
 		}
 
 		// Calculate RSI for each point
-		if i >= 7 {
-			rsi7 := calculateRSI(klines[:i+1], 7)
-			data.RSI7Values = append(data.RSI7Values, rsi7)
-		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
+		if indicators.EnableRSI {
+			if len(periods.rsi) > 0 && i >= periods.rsi[0]-1 {
+				rsi1 := calculateRSI(klines[:i+1], periods.rsi[0])
+				data.RSI7Values = append(data.RSI7Values, rsi1)
+			}
+			if len(periods.rsi) > 1 && i >= periods.rsi[1]-1 {
+				rsi2 := calculateRSI(klines[:i+1], periods.rsi[1])
+				data.RSI14Values = append(data.RSI14Values, rsi2)
+			}
 		}
 	}
 
 	// Calculate 3m ATR14
-	data.ATR14 = calculateATR(klines, 14)
+	if indicators.EnableATR && len(periods.atr) > 0 {
+		data.ATR14 = calculateATR(klines, periods.atr[0])
+	}
 
 	return data
 }
 
 // calculateLongerTermData calculates longer-term data
-func calculateLongerTermData(klines []Kline) *LongerTermData {
+func calculateLongerTermData(klines []Kline, indicators store.IndicatorConfig, periods indicatorPeriods) *LongerTermData {
 	data := &LongerTermData{
 		MACDValues:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
 	}
 
 	// Calculate EMA
-	data.EMA20 = calculateEMA(klines, 20)
-	data.EMA50 = calculateEMA(klines, 50)
+	if indicators.EnableEMA && len(periods.ema) > 0 {
+		data.EMA20 = calculateEMA(klines, periods.ema[0])
+	}
+	if indicators.EnableEMA && len(periods.ema) > 1 {
+		data.EMA50 = calculateEMA(klines, periods.ema[1])
+	}
 
 	// Calculate ATR
-	data.ATR3 = calculateATR(klines, 3)
-	data.ATR14 = calculateATR(klines, 14)
+	if indicators.EnableATR && len(periods.atr) > 0 {
+		// keep ATR3 for backward compatibility; if custom period is short, still keep ATR3
+		data.ATR3 = calculateATR(klines, 3)
+		data.ATR14 = calculateATR(klines, periods.atr[0])
+	}
 
 	// Calculate volume
 	if len(klines) > 0 {
@@ -775,13 +1057,13 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	}
 
 	for i := start; i < len(klines); i++ {
-		if i >= 25 {
+		if indicators.EnableMACD && i >= 25 {
 			macd := calculateMACD(klines[:i+1])
 			data.MACDValues = append(data.MACDValues, macd)
 		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
+		if indicators.EnableRSI && len(periods.rsi) > 0 && i >= periods.rsi[0]-1 {
+			rsi := calculateRSI(klines[:i+1], periods.rsi[0])
+			data.RSI14Values = append(data.RSI14Values, rsi)
 		}
 	}
 
@@ -1141,6 +1423,21 @@ func BuildDataFromKlines(symbol string, primary []Kline, longer []Kline) (*Data,
 		return nil, fmt.Errorf("primary series is empty")
 	}
 
+	// Default indicator config for offline construction
+	indicators := store.IndicatorConfig{
+		EnableEMA:    true,
+		EnableMACD:   true,
+		EnableRSI:    true,
+		EnableATR:    true,
+		EnableBOLL:   true,
+		EnableVolume: true,
+		EMAPeriods:   []int{20, 50},
+		RSIPeriods:   []int{7, 14},
+		ATRPeriods:   []int{14},
+		BOLLPeriods:  []int{20},
+	}
+	periods := resolveIndicatorPeriods(indicators)
+
 	symbol = Normalize(symbol)
 	current := primary[len(primary)-1]
 	currentPrice := current.Close
@@ -1148,19 +1445,23 @@ func BuildDataFromKlines(symbol string, primary []Kline, longer []Kline) (*Data,
 	data := &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
-		CurrentEMA20:      calculateEMA(primary, 20),
+		CurrentEMA20:      calculateEMA(primary, periods.ema[0]),
 		CurrentMACD:       calculateMACD(primary),
-		CurrentRSI7:       calculateRSI(primary, 7),
+		CurrentRSI7:       calculateRSI(primary, periods.rsi[0]),
 		PriceChange1h:     priceChangeFromSeries(primary, time.Hour),
 		PriceChange4h:     priceChangeFromSeries(primary, 4*time.Hour),
 		OpenInterest:      &OIData{Latest: 0, Average: 0},
 		FundingRate:       0,
-		IntradaySeries:    calculateIntradaySeries(primary),
+		IntradaySeries:    calculateIntradaySeries(primary, indicators, periods),
 		LongerTermContext: nil,
+		EMAPeriods:        periods.ema,
+		RSIPeriods:        periods.rsi,
+		ATRPeriods:        periods.atr,
+		BOLLPeriods:       periods.boll,
 	}
 
 	if len(longer) > 0 {
-		data.LongerTermContext = calculateLongerTermData(longer)
+		data.LongerTermContext = calculateLongerTermData(longer, indicators, periods)
 	}
 
 	return data, nil
