@@ -14,6 +14,7 @@ type Page =
   | 'strategy'
   | 'strategy-market'
   | 'data'
+  | 'tech-backtest'
   | 'debate'
   | 'faq'
   | 'login'
@@ -100,6 +101,7 @@ export default function HeaderBar({
               // Define all navigation tabs
               const navTabs: { page: Page; path: string; label: string; requiresAuth: boolean }[] = [
                 { page: 'data', path: '/data', label: language === 'zh' ? '数据' : 'Data', requiresAuth: false },
+                { page: 'tech-backtest', path: '/tech-backtest', label: language === 'zh' ? '技术回测' : 'Tech BT', requiresAuth: true },
                 { page: 'strategy-market', path: '/strategy-market', label: language === 'zh' ? '策略市场' : 'Market', requiresAuth: true },
                 { page: 'traders', path: '/traders', label: t('configNav', language), requiresAuth: true },
                 { page: 'trader', path: '/dashboard', label: t('dashboardNav', language), requiresAuth: true },

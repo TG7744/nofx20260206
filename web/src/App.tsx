@@ -15,6 +15,7 @@ import { StrategyStudioPage } from './pages/StrategyStudioPage'
 import { DebateArenaPage } from './pages/DebateArenaPage'
 import { StrategyMarketPage } from './pages/StrategyMarketPage'
 import { DataPage } from './pages/DataPage'
+import { TechBacktestPage } from './pages/TechBacktestPage'
 import { LoginRequiredOverlay } from './components/LoginRequiredOverlay'
 import HeaderBar from './components/HeaderBar'
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext'
@@ -43,6 +44,7 @@ type Page =
   | 'strategy'
   | 'strategy-market'
   | 'data'
+  | 'tech-backtest'
   | 'debate'
   | 'faq'
   | 'login'
@@ -71,6 +73,7 @@ function App() {
     if (path === '/strategy' || hash === 'strategy') return 'strategy'
     if (path === '/strategy-market' || hash === 'strategy-market') return 'strategy-market'
     if (path === '/data' || hash === 'data') return 'data'
+    if (path === '/tech-backtest' || hash === 'tech-backtest') return 'tech-backtest'
     if (path === '/debate' || hash === 'debate') return 'debate'
     if (path === '/dashboard' || hash === 'trader' || hash === 'details')
       return 'trader'
@@ -92,6 +95,7 @@ function App() {
       'competition': '/competition',
       'strategy-market': '/strategy-market',
       'data': '/data',
+      'tech-backtest': '/tech-backtest',
       'traders': '/traders',
       'trader': '/dashboard',
       'backtest': '/backtest',
@@ -476,6 +480,8 @@ function App() {
               <BacktestPage />
             ) : currentPage === 'strategy' ? (
               <StrategyStudioPage />
+            ) : currentPage === 'tech-backtest' ? (
+              <TechBacktestPage />
             ) : currentPage === 'debate' ? (
               <DebateArenaPage />
             ) : (

@@ -866,6 +866,158 @@ export interface MarketCacheItem {
   size_bytes: number
 }
 
+// Tech backtest
+export type TechStrategyType = 'ema_cross' | 'rsi_threshold' | 'boll_breakout' | 'macd_filter' | 'cci_threshold'
+
+export interface TechStrategyConfig {
+  type: TechStrategyType
+  params?: Record<string, number>
+}
+
+export interface TechBacktestRequest {
+  symbol: string
+  timeframe: string
+  start?: string
+  end?: string
+  initial_balance?: number
+  fee_bps?: number
+  slippage_bps?: number
+  leverage?: number
+  stop_loss_pct?: number
+  take_profit_pct?: number
+  trailing_stop_pct?: number
+  supertrend_period?: number
+  supertrend_mult?: number
+  strategy: TechStrategyConfig
+}
+
+export interface TechEquityPoint {
+  time: number
+  equity: number
+}
+
+export interface TechTrade {
+  entry_time: number
+  exit_time: number
+  entry_px: number
+  exit_px: number
+  qty: number
+  pnl: number
+  pnl_pct: number
+  side: string
+}
+
+export interface TechStats {
+  trades: number
+  win_rate: number
+  total_pnl: number
+  total_return: number
+  max_drawdown: number
+  profit_factor: number
+  sharpe: number
+}
+
+export interface TechBacktestResult {
+  equity: TechEquityPoint[]
+  trades: TechTrade[]
+  stats: TechStats
+  symbol: string
+  timeframe: string
+  strategy: TechStrategyConfig
+  signals?: TechSignal[]
+  klines?: TechKline[]
+  overlay?: TechOverlay
+}
+
+export interface TechBacktestRun {
+  id: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  started_at: string
+  ended_at?: string
+  error?: string
+  result?: TechBacktestResult
+  config: TechBacktestRequest
+}
+
+export interface TechBatchItem {
+  config: TechBacktestRequest
+  result?: TechBacktestResult
+  error?: string
+  duration_ms: number
+}
+
+export interface TechBatchResponse {
+  items: TechBatchItem[]
+  summary?: TechBatchSummary
+  parallel?: number
+  batch_id?: string
+}
+
+export interface TechBatchRequest {
+  items: TechBacktestRequest[]
+  parallel?: number
+}
+
+export interface TechBatchSummary {
+  count: number
+  success: number
+  failure: number
+  best_return: number
+  worst_return: number
+  avg_return: number
+  avg_drawdown: number
+  avg_win_rate: number
+  avg_profit_factor: number
+  total_runtime_ms: number
+}
+
+export interface TechBatchJob {
+  id: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  started_at: string
+  ended_at?: string
+  items: TechBatchItem[]
+  summary?: TechBatchSummary
+  parallel: number
+  total: number
+  done: number
+  error?: string
+}
+
+export interface TechSignal {
+  time: number
+  price: number
+  side: 'buy' | 'sell'
+}
+
+export interface TechKline {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export interface TechSeriesPoint {
+  time: number
+  value: number
+}
+
+export interface TechOverlay {
+  ema1?: TechSeriesPoint[]
+  ema2?: TechSeriesPoint[]
+  boll_upper?: TechSeriesPoint[]
+  boll_mid?: TechSeriesPoint[]
+  boll_lower?: TechSeriesPoint[]
+  macd_line?: TechSeriesPoint[]
+  macd_signal?: TechSeriesPoint[]
+  macd_hist?: TechSeriesPoint[]
+  rsi?: TechSeriesPoint[]
+  atr?: TechSeriesPoint[]
+  vwap?: TechSeriesPoint[]
+}
+
 export interface PositionHistoryResponse {
   positions: HistoricalPosition[]
   stats: TraderStats | null

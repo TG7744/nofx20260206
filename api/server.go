@@ -19,6 +19,7 @@ import (
 	"nofx/provider/hyperliquid"
 	"nofx/provider/twelvedata"
 	"nofx/store"
+	"nofx/techbacktest"
 	"nofx/trader"
 	"nofx/trader/aster"
 	"nofx/trader/binance"
@@ -61,6 +62,8 @@ type Server struct {
 	cryptoHandler   *CryptoHandler
 	backtestManager *backtest.Manager
 	debateHandler   *DebateHandler
+	techBTManager   *techbacktest.Manager
+	techBTBatchMgr  *techbacktest.BatchManager
 	httpServer      *http.Server
 	port            int
 	scheduleTimers  map[string]*time.Timer
@@ -87,6 +90,8 @@ func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoServ
 	}
 	debateHandler := NewDebateHandler(debateStore, st.Strategy(), st.AIModel())
 	debateHandler.SetTraderManager(traderManager)
+	techBTManager := techbacktest.NewManager()
+	techBatchMgr := techbacktest.NewBatchManager()
 
 	s := &Server{
 		router:          router,
@@ -95,6 +100,8 @@ func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoServ
 		cryptoHandler:   cryptoHandler,
 		backtestManager: backtestManager,
 		debateHandler:   debateHandler,
+		techBTManager:   techBTManager,
+		techBTBatchMgr:  techBatchMgr,
 		port:            port,
 		scheduleTimers:  make(map[string]*time.Timer),
 	}
@@ -195,6 +202,14 @@ func (s *Server) setupRoutes() {
 			protected.GET("/market-cache", s.handleListMarketCache)
 			protected.POST("/market-cache/delete", s.handleDeleteMarketCache)
 			protected.GET("/market-cache/download", s.handleDownloadMarketCache)
+
+			// Technical backtest (indicator-only)
+			protected.POST("/tech-backtest/run", s.handleTechBacktestRun)
+			protected.POST("/tech-backtest/batch", s.handleTechBacktestBatch)
+			protected.GET("/tech-backtest/batch/:id", s.handleTechBacktestBatchStatus)
+			protected.GET("/tech-backtest/runs", s.handleTechBacktestRuns)
+			protected.GET("/tech-backtest/result/:id", s.handleTechBacktestResult)
+			protected.GET("/tech-backtest/export/:id", s.handleTechBacktestExport)
 
 			// AI model configuration
 			protected.GET("/models", s.handleGetModelConfigs)
