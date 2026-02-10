@@ -443,6 +443,47 @@ export interface BacktestKlinesResponse {
   run_id: string
 }
 
+// Rule-based backtest (server placeholder)
+export type RuleBacktestRunResponse = BacktestRunMetadata
+
+export interface RuleBacktestListResponse {
+  total: number
+  items: BacktestRunMetadata[]
+}
+
+export type RuleMetrics = BacktestMetrics
+export type RuleEquityPoint = BacktestEquityPoint
+export type RuleTrade = BacktestTradeEvent
+
+export interface RuleReport {
+  run_id: string
+  summary: BacktestMetrics
+  notes?: string[]
+  sections?: {
+    title: string
+    content: string
+  }[]
+}
+
+export interface RuleFactorEntry {
+  name: string
+  value: number
+  weight?: number
+  symbol?: string
+  timestamp?: number
+  note?: string
+}
+
+export interface RuleSearchResponse {
+  task_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | string
+  runs?: BacktestRunMetadata[]
+  message?: string
+  errors?: string[]
+  created_at?: string
+  updated_at?: string
+}
+
 // Strategy Studio Types
 export interface Strategy {
   id: string
