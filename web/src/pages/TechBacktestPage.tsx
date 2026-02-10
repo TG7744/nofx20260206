@@ -34,29 +34,72 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 const timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
 
+type IndicatorKey = 'ema' | 'vwap' | 'boll' | 'supertrend' | 'atr'
+
+const indicatorOptions: { key: IndicatorKey; label: string }[] = [
+  { key: 'ema', label: 'EMA 快/慢' },
+  { key: 'vwap', label: 'VWAP' },
+  { key: 'boll', label: '布林带' },
+  { key: 'supertrend', label: 'Supertrend' },
+  { key: 'atr', label: 'ATR 通道' },
+]
+
 function BoardChart({
   klines,
   overlay,
   signals,
   fallback,
+  indicatorVisibility,
+  showPriceLine,
 }: {
   klines: { time: number; open: number; high: number; low: number; close: number; volume: number }[]
   overlay?: any
   signals?: { time: number; price: number; side: 'buy' | 'sell' }[]
   fallback?: React.ReactNode
+  indicatorVisibility: Record<IndicatorKey, boolean>
+  showPriceLine: boolean
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<any>(null)
   const [failed, setFailed] = useState(false)
   const [hover, setHover] = useState<{ o: number; h: number; l: number; c: number; t: number } | null>(null)
 
+  // 清洗指标数据，去除缺失/非数值点和明显离谱值，避免图形被拉爆
+  const cleanPoints = (points: any[] | undefined, range?: { lower: number; upper: number }, allowNegative = false) =>
+    (points || [])
+      .filter((p) => p && Number.isFinite(p.time) && Number.isFinite(p.value))
+      .filter((p) => (allowNegative ? true : p.value > 0)) // 价格类指标为正，MACD 等动量指标允许负值
+      .filter((p) => {
+        if (!range) return true
+        return p.value >= range.lower && p.value <= range.upper
+      })
+      .map((p) => ({ time: p.time, value: p.value }))
+
   useEffect(() => {
     let dispose: (() => void) | null = null
     function loadChart() {
       if (!containerRef.current || !klines || klines.length === 0) return
+      // 每次重新绘制前清除失败状态，避免一次错误后永远落到回退图表
+      setFailed(false)
+
+      // 依据价格区间过滤离谱的指标点（常见于数据缺失返回 0 或极端值）
+      const closes = klines.map((k) => k.close).filter((v) => Number.isFinite(v))
+      const priceRange =
+        closes.length > 0
+          ? {
+              lower: Math.max(0, Math.min(...closes) * 0.5),
+              upper: Math.max(...closes) * 2,
+            }
+          : undefined
       try {
         if (chartRef.current) {
-          chartRef.current.remove()
+          // chartRef.current 可能已在上一次清理时移除，这里做防御以避免二次 remove 抛错
+          try {
+            chartRef.current.remove()
+          } catch {
+            /* ignore double-remove */
+          }
+          chartRef.current = null
         }
         const chart = createChart(containerRef.current, {
           width: containerRef.current.clientWidth,
@@ -100,14 +143,16 @@ function BoardChart({
         candleSeries.setData(candles)
 
         const last = candles[candles.length - 1]
-        candleSeries.createPriceLine({
-          price: last.close,
-          color: priceLineColor,
-          lineWidth: 2,
-          lineStyle: 1,
-          axisLabelVisible: true,
-          title: 'Last',
-        })
+        if (showPriceLine) {
+          candleSeries.createPriceLine({
+            price: last.close,
+            color: priceLineColor,
+            lineWidth: 2,
+            lineStyle: 1,
+            axisLabelVisible: true,
+            title: 'Last',
+          })
+        }
 
         const volSeries = chart.addSeries(HistogramSeries, {
           color: '#334155',
@@ -123,30 +168,96 @@ function BoardChart({
           }))
         )
 
-        const addLine = (points: any[], color: string, width = 1, dashed = false) => {
-          if (!points || points.length === 0) return
-          const line = chart.addSeries(LineSeries, {
-            color,
-            lineWidth: Math.max(1, Math.round(width)) as LineWidth,
-            lineStyle: dashed ? 2 : 0,
+        // 将 MACD 曲线叠加到同一张行情图（独立价格轴，位于底部，避免与主价格区重叠）
+        const macdLine = cleanPoints(overlay?.macd_line, undefined, true)
+        const macdSignal = cleanPoints(overlay?.macd_signal, undefined, true)
+        const macdHist = cleanPoints(overlay?.macd_hist, undefined, true)
+        const hasMacd = macdLine.length > 0 && macdSignal.length > 0 && macdHist.length > 0
+
+        if (hasMacd) {
+          const macdScaleId = 'macd'
+          chart.priceScale(macdScaleId).applyOptions({
+            scaleMargins: { top: 0.72, bottom: 0.18 },
+            borderColor: 'rgba(255,255,255,0.06)',
           })
-          line.setData(
-            points.map((p: any) => ({
+
+          const macdHistSeries = chart.addSeries(HistogramSeries, {
+            priceScaleId: macdScaleId,
+            base: 0,
+            color: '#1F2937',
+            priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+          })
+          macdHistSeries.setData(
+            macdHist.map((p: any) => ({
+              time: Math.round(p.time / 1000) as UTCTimestamp,
+              value: p.value,
+              color: p.value >= 0 ? 'rgba(14,203,129,0.6)' : 'rgba(246,70,93,0.6)',
+            }))
+          )
+
+          const macdLineSeries = chart.addSeries(LineSeries, {
+            priceScaleId: macdScaleId,
+            color: '#0EA5E9',
+            lineWidth: 1.4 as LineWidth,
+            lastValueVisible: false,
+            priceLineVisible: false,
+          })
+          macdLineSeries.setData(
+            macdLine.map((p: any) => ({
+              time: Math.round(p.time / 1000) as UTCTimestamp,
+              value: p.value,
+            }))
+          )
+
+          const macdSignalSeries = chart.addSeries(LineSeries, {
+            priceScaleId: macdScaleId,
+            color: '#F3BA2F',
+            lineWidth: 1.1 as LineWidth,
+            lastValueVisible: false,
+            priceLineVisible: false,
+          })
+          macdSignalSeries.setData(
+            macdSignal.map((p: any) => ({
               time: Math.round(p.time / 1000) as UTCTimestamp,
               value: p.value,
             }))
           )
         }
 
-        addLine(overlay?.ema1, '#F3BA2F', 1.4)
-        addLine(overlay?.ema2, '#8B5CF6', 1.4)
-        addLine(overlay?.vwap, '#22D3EE', 1, true)
-        addLine(overlay?.boll_upper, '#6EE7B7', 1, true)
-        addLine(overlay?.boll_mid, '#38BDF8', 1.2)
-        addLine(overlay?.boll_lower, '#6EE7B7', 1, true)
-        addLine(overlay?.supertrend, '#FB7185', 1.6)
-        addLine(overlay?.atr_upper, '#F59E0B', 0.9, true)
-        addLine(overlay?.atr_lower, '#F59E0B', 0.9, true)
+        const addLine = (points: any[], color: string, width = 1, dashed = false) => {
+          const cleaned = cleanPoints(points, priceRange)
+          if (!cleaned || cleaned.length === 0) return
+          const line = chart.addSeries(LineSeries, {
+            color,
+            lineWidth: Math.max(1, Math.round(width)) as LineWidth,
+            lineStyle: dashed ? 2 : 0,
+            // 不展示指标的最新价参考线，避免右侧出现多条彩色虚线
+            lastValueVisible: false,
+            priceLineVisible: false,
+          })
+          line.setData(
+            cleaned.map((p: any) => ({
+              time: Math.round(p.time / 1000) as UTCTimestamp,
+              value: p.value,
+            }))
+          )
+        }
+
+        if (indicatorVisibility.ema) {
+          addLine(overlay?.ema1, '#F3BA2F', 1.4)
+          addLine(overlay?.ema2, '#8B5CF6', 1.4)
+        }
+        if (indicatorVisibility.vwap) addLine(overlay?.vwap, '#22D3EE', 1, true)
+        if (indicatorVisibility.boll) {
+          addLine(overlay?.boll_upper, '#6EE7B7', 1, true)
+          addLine(overlay?.boll_mid, '#38BDF8', 1.2)
+          addLine(overlay?.boll_lower, '#6EE7B7', 1, true)
+        }
+        if (indicatorVisibility.supertrend) addLine(overlay?.supertrend, '#FB7185', 1.6)
+        if (indicatorVisibility.atr) {
+          addLine(overlay?.atr_upper, '#F59E0B', 0.9, true)
+          addLine(overlay?.atr_lower, '#F59E0B', 0.9, true)
+        }
 
         if (signals && signals.length > 0) {
           const markers: SeriesMarker<UTCTimestamp>[] = signals.map((s) => ({
@@ -180,7 +291,11 @@ function BoardChart({
 
         dispose = () => {
           window.removeEventListener('resize', handleResize)
-          chart.remove()
+          try {
+            chart.remove()
+          } finally {
+            chartRef.current = null
+          }
         }
       } catch (err) {
         console.error('lightweight-charts load failed', err)
@@ -191,7 +306,7 @@ function BoardChart({
     return () => {
       if (dispose) dispose()
     }
-  }, [JSON.stringify(klines), JSON.stringify(overlay), JSON.stringify(signals)])
+  }, [JSON.stringify(klines), JSON.stringify(overlay), JSON.stringify(signals), JSON.stringify(indicatorVisibility)])
 
   if (failed) {
     if (fallback) return <>{fallback}</>
@@ -265,6 +380,14 @@ export function TechBacktestPage() {
   const [initialBalance, setInitialBalance] = useState(1000)
   const [feeBps, setFeeBps] = useState(5)
   const [slippageBps, setSlippageBps] = useState(1)
+  const [indicatorVisibility, setIndicatorVisibility] = useState<Record<IndicatorKey, boolean>>({
+    ema: true,
+    vwap: true,
+    boll: true,
+    supertrend: true,
+    atr: true,
+  })
+  const [showPriceLine, setShowPriceLine] = useState(true)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<TechBacktestResult | null>(null)
@@ -709,18 +832,51 @@ export function TechBacktestPage() {
                 <h3 className="text-sm text-white">价格K线 & 信号</h3>
                 <div className="text-xs text-[#848E9C]">绿▲ 买入 / 红▲ 卖出</div>
               </div>
+              <div className="flex flex-wrap items-center gap-2 mt-2 text-[11px] text-[#EAECEF]">
+                <span className="text-[#848E9C]">显示指标:</span>
+                {indicatorOptions.map((opt) => (
+                  <label key={opt.key} className="flex items-center gap-1 px-2 py-[2px] bg-[#111827] border border-[#1F2933] rounded hover:border-[#2B3139] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="accent-[#0ECB81] bg-[#0B0E11] border-[#2B3139]"
+                      checked={indicatorVisibility[opt.key]}
+                      onChange={(e) =>
+                        setIndicatorVisibility((prev) => ({
+                          ...prev,
+                          [opt.key]: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                ))}
+                <label className="flex items-center gap-1 px-2 py-[2px] bg-[#111827] border border-[#1F2933] rounded hover:border-[#2B3139] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="accent-[#FBBF24] bg-[#0B0E11] border-[#2B3139]"
+                    checked={showPriceLine}
+                    onChange={(e) => setShowPriceLine(e.target.checked)}
+                  />
+                  <span>Last 价格线</span>
+                </label>
+              </div>
               <div className="mt-2">
                 <BoardChart
                   klines={result.klines}
                   overlay={result.overlay}
                   signals={result.signals}
+                  indicatorVisibility={indicatorVisibility}
+                  showPriceLine={showPriceLine}
                   fallback={
                     <ResponsiveContainer width="100%" height={360}>
                       <ComposedChart
-                        data={result.klines.map((k) => ({
+                        data={result.klines.map((k, idx) => ({
                           t: fmtTime(k.time),
                           close: k.close,
                           volume: k.volume,
+                          macd_line: result.overlay?.macd_line?.[idx]?.value ?? null,
+                          macd_signal: result.overlay?.macd_signal?.[idx]?.value ?? null,
+                          macd_hist: result.overlay?.macd_hist?.[idx]?.value ?? null,
                         }))}
                       >
                         <CartesianGrid stroke="#2B3139" />
@@ -733,43 +889,31 @@ export function TechBacktestPage() {
                           stroke="#2B3139"
                           domain={[0, (dataMax: number) => dataMax * 1.2]}
                         />
+                        <YAxis yAxisId="macd" hide domain={['auto', 'auto']} />
                         <Tooltip
                           contentStyle={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
                           labelStyle={{ color: '#EAECEF' }}
                         />
                         <Line yAxisId="price" type="monotone" dataKey="close" stroke="#0EA5E9" dot={false} strokeWidth={1.1} />
                         <Bar yAxisId="vol" dataKey="volume" fill="#3A4250" barSize={2} radius={[2, 2, 0, 0]} opacity={0.7} />
+                        <Bar
+                          yAxisId="macd"
+                          dataKey="macd_hist"
+                          barSize={3}
+                          radius={[1, 1, 0, 0]}
+                          shape={(props: any) => {
+                            const { x, y, width, height, payload } = props
+                            if (x === undefined || y === undefined || width === undefined || height === undefined) return null
+                            const color = (payload?.macd_hist ?? 0) >= 0 ? '#16A34A' : '#F43F5E'
+                            return <rect x={x} y={y} width={width} height={height} fill={color} rx={1} ry={1} />
+                          }}
+                        />
+                        <Line yAxisId="macd" type="monotone" dataKey="macd_line" stroke="#0EA5E9" dot={false} strokeWidth={1} />
+                        <Line yAxisId="macd" type="monotone" dataKey="macd_signal" stroke="#F3BA2F" dot={false} strokeWidth={0.9} />
                       </ComposedChart>
                     </ResponsiveContainer>
                   }
                 />
-              </div>
-            </div>
-          )}
-
-          {/* MACD panel */}
-          {result.overlay?.macd_line && (
-            <div className="p-3 bg-[#0B0E11] border border-[#2B3139] rounded">
-              <h3 className="text-sm text-white mb-1">MACD</h3>
-              <div className="h-40">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart
-                    data={(result.overlay.macd_line || []).map((p, idx) => ({
-                      t: fmtTime(p.time),
-                      line: p.value,
-                      signal: result.overlay?.macd_signal?.[idx]?.value ?? null,
-                      hist: result.overlay?.macd_hist?.[idx]?.value ?? null,
-                    }))}
-                  >
-                    <CartesianGrid stroke="#2B3139" />
-                    <XAxis dataKey="t" tick={{ fontSize: 10, fill: '#848E9C' }} hide />
-                    <YAxis tick={{ fontSize: 10, fill: '#848E9C' }} stroke="#2B3139" domain={['auto', 'auto']} />
-                    <Tooltip contentStyle={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }} labelStyle={{ color: '#EAECEF' }} />
-                    <Bar dataKey="hist" barSize={4} fill="#334155" />
-                    <Line type="monotone" dataKey="line" stroke="#0EA5E9" dot={false} strokeWidth={1.1} />
-                    <Line type="monotone" dataKey="signal" stroke="#F3BA2F" dot={false} strokeWidth={1} />
-                  </ComposedChart>
-                </ResponsiveContainer>
               </div>
             </div>
           )}
